@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import smtplib
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ class PipelineConfig:
     repo_name: str = os.getenv("REPO_NAME", "datafiles")
     repo_folder: str = os.getenv("REPO_FOLDER", "aqualog")
     repo_branch: str = os.getenv("REPO_BRANCH", "master")
+    repo_json_files: str = os.getenv("REPO_JSON_FILES", "")
     output_folder: str = os.getenv("OUTPUT_FOLDER", "./output_water")
     request_timeout: int = int(os.getenv("REQUEST_TIMEOUT", "30"))
     json_file_urls: str = os.getenv("JSON_FILE_URLS", "")
@@ -97,24 +99,77 @@ def _build_headers(token: str | None) -> dict[str, str]:
     return headers
 
 
+def _build_raw_url(config: PipelineConfig, file_path: str) -> str:
+    return (
+        f"https://raw.githubusercontent.com/{config.repo_owner}/"
+        f"{config.repo_name}/{config.repo_branch}/{file_path}"
+    )
+
+
+def _list_json_files_from_known_names(config: PipelineConfig) -> list[dict[str, Any]]:
+    names = [n.strip() for n in config.repo_json_files.split(",") if n.strip()]
+    if not names:
+        return []
+
+    return [
+        {
+            "name": Path(name).name,
+            "path": f"{config.repo_folder}/{name}",
+            "download_url": _build_raw_url(config, f"{config.repo_folder}/{name}"),
+        }
+        for name in names
+    ]
+
+
 def _list_json_files(config: PipelineConfig, token: str | None) -> list[dict[str, Any]]:
+    # Preferred fallback: explicit file names from env, avoiding GitHub folder listing.
+    known_files = _list_json_files_from_known_names(config)
+    if known_files:
+        return known_files
+
     url = f"https://api.github.com/repos/{config.repo_owner}/{config.repo_name}/contents/{config.repo_folder}"
     params = {"ref": config.repo_branch} if config.repo_branch else None
     response = requests.get(url, headers=_build_headers(token), params=params, timeout=config.request_timeout)
-    response.raise_for_status()
-    payload = response.json()
+    if response.ok:
+        payload = response.json()
+        return [
+            item
+            for item in payload
+            if item.get("type") == "file" and str(item.get("name", "")).endswith(".json")
+        ]
+
+    tree_url = f"https://github.com/{config.repo_owner}/{config.repo_name}/tree/{config.repo_branch}/{config.repo_folder}"
+    tree_response = requests.get(tree_url, timeout=config.request_timeout)
+    tree_response.raise_for_status()
+
+    html = tree_response.text
+    pattern = rf'href="/{re.escape(config.repo_owner)}/{re.escape(config.repo_name)}/blob/{re.escape(config.repo_branch)}/{re.escape(config.repo_folder)}/([^"]+?\.json)"'
+    matches = re.findall(pattern, html)
+
+    if not matches:
+        response.raise_for_status()
 
     return [
-        item
-        for item in payload
-        if item.get("type") == "file" and str(item.get("name", "")).endswith(".json")
+        {
+            "name": file_name.split("/")[-1],
+            "path": f"{config.repo_folder}/{file_name}",
+            "download_url": _build_raw_url(config, f"{config.repo_folder}/{file_name}"),
+        }
+        for file_name in sorted(set(matches))
     ]
 
 
 def _read_json(url: str, token: str | None, timeout: int) -> Any:
-    response = requests.get(url, headers=_build_headers(token), timeout=timeout)
-    response.raise_for_status()
-    return response.json()
+    if url.startswith("http://") or url.startswith("https://"):
+        response = requests.get(url, headers=_build_headers(token), timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+
+    path = Path(url)
+    if not path.exists():
+        raise FileNotFoundError(f"Ficheiro JSON local não encontrado: {url}")
+    with path.open("r", encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 def _normalize_records(data: Any, source_file: str, run_id: str) -> list[dict[str, Any]]:
@@ -259,9 +314,9 @@ def run_pipeline(config: PipelineConfig | None = None) -> dict[str, Any]:
 
     try:
         if manual_urls:
-            logger.info("Modo URL direta ativo com %s ficheiros.", len(manual_urls))
+            logger.info("Modo URL/ficheiro direto ativo com %s entradas.", len(manual_urls))
             for url in manual_urls:
-                file_name = url.split("/")[-1] or "unknown.json"
+                file_name = Path(url).name if not (url.startswith("http://") or url.startswith("https://")) else (url.split("/")[-1] or "unknown.json")
                 data = _read_json(url, token, config.request_timeout)
                 records = _normalize_records(data, file_name, run_id)
                 all_records.extend(records)
@@ -309,10 +364,15 @@ def run_pipeline(config: PipelineConfig | None = None) -> dict[str, Any]:
     except Exception as exc:
         elapsed = round(time.perf_counter() - started, 2)
         logger.exception("Falha na pipeline")
+        hint = (
+            "Dica: se a listagem do repo no GitHub falhar (404), preenche JSON_FILE_URLS "
+            "com URLs raw diretas ou caminhos locais para ficheiros .json separados por vírgula."
+        )
         result = {
             "status": "error",
             "run_id": run_id,
             "error": str(exc),
+            "hint": hint,
             "elapsed_seconds": elapsed,
             "files_processed": files_processed,
         }

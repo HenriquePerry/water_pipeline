@@ -1,76 +1,65 @@
 # Pipeline de Agua - Estrutura em Scripts
 
-## 📁 Organização (como os teus colegas fazem)
+## 📁 Organização mínima
 
-Cada célula do notebook original agora está num ficheiro separado dentro da pasta `scripts/`:
+Mantivemos apenas o essencial para correr no Colab:
 
 ```
 scripts/
-├── 01_imports.py           # Importações e setup de environment
-├── 02_config.py            # Configuração da pipeline (repo, output, etc)
-├── 03_run_pipeline.py      # Executar a pipeline
-├── 04_display_results.py   # Visualizar resultados em DataFrame
-├── 05_flask_info.py        # Instruções para Flask
-├── main.py                 # Orquestra tudo (entry point)
-└── __init__.py             # Torna pasta em Python package
+├── pip_water.py            # Pipeline all-in-one (Colab/local)
+└── README.md
 ```
 
 ## 🚀 Como Usar
 
-### Opção 1: Executar Completo
+### Google Colab (prioridade)
 ```bash
-python scripts/main.py
-```
-Isto executa todos os passos: config → pipeline → display → info
-
-### Opção 2: Executar Passos Individuais
-```bash
-# Só ver configuração
-python scripts/02_config.py
-
-# Só correr a pipeline
-python scripts/03_run_pipeline.py
-
-# Só visualizar resultados
-python scripts/04_display_results.py
-
-# Ver instruções Flask
-python scripts/05_flask_info.py
+!pip install -r requirements.txt
+!python scripts/pip_water.py
 ```
 
-## 📝 Vantagens desta Estrutura
-
-✅ **Modularidade**: Cada ficheiro tem responsabilidade única  
-✅ **Reutilização**: Pode importar cada script/função isoladamente  
-✅ **Legibilidade**: Código melhor organizado e documentado  
-✅ **Facilita Debugging**: Pode executar passos individualmente  
-✅ **Bom para Controle de Versão**: Mudanças isoladas por funcionalidade  
-
-## 🔧 Importar em Outro Projeto
-
-Se quiseres importar a pipeline de outro ficheiro:
-
+### Google Colab Browser (upload manual)
 ```python
-import sys
-sys.path.insert(0, './scripts')
+from google.colab import files
+import os
 
-from water_pipeline import run_pipeline
-from scripts.scripts_02_config import setup_config
+os.makedirs('/content/PI/scripts', exist_ok=True)
+os.makedirs('/content/data/aqualog', exist_ok=True)
 
-config = setup_config()
-result = run_pipeline()
+print('Upload do pip_water.py')
+uploaded_script = files.upload()
+for name, content in uploaded_script.items():
+	if name == 'pip_water.py':
+		with open('/content/PI/scripts/pip_water.py', 'wb') as f:
+			f.write(content)
+
+print('Upload dos ficheiros .json')
+uploaded_json = files.upload()
+for name, content in uploaded_json.items():
+	if name.lower().endswith('.json'):
+		with open(f'/content/data/aqualog/{name}', 'wb') as f:
+			f.write(content)
+
+os.environ['LOCAL_JSON_DIR'] = '/content/data/aqualog'
+```
+
+```bash
+!python /content/PI/scripts/pip_water.py
+```
+
+Se fores usar ficheiros locais no Colab (em vez de API GitHub privada):
+```python
+import os
+os.environ["LOCAL_JSON_DIR"] = "/content/data/aqualog"
+```
+
+```bash
+!python scripts/pip_water.py
 ```
 
 ## 📌 Ficheiros Principais (fora de scripts/)
 
-- `water_pipeline.py` - O módulo principal com toda a lógica
-- `app.py` - Flask API wrapper
-- `.env` - Variáveis de ambiente (⚠️ NUNCA fazer commit)
-- `.env.example` - Template (para distribuir)
+- `scripts/pip_water.py` - Pipeline all-in-one para execução
+- `.env` - Variáveis de ambiente 
 - `requirements.txt` - Dependências Python
 
-## 🐛 Troubleshooting
-
-Se vires erro `ModuleNotFoundError: No module named 'water_pipeline'`:
-- Certifica-te que estás a correr de dentro da pasta raiz do projeto
-- Ou adiciona o path manualmente: `sys.path.insert(0, '.')`

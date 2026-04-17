@@ -2,6 +2,7 @@
 """pip_water.py"""
 
 import json
+import hashlib
 import os
 import re
 import smtplib
@@ -16,6 +17,12 @@ from typing import Any
 
 import pandas as pd
 import requests
+
+try:
+    from pymongo import MongoClient, UpdateOne
+except Exception:  # pragma: no cover - optional dependency at runtime
+    MongoClient = None  # type: ignore[assignment]
+    UpdateOne = None  # type: ignore[assignment]
 
 
 def _env_bool(name: str, default: str = 'false') -> bool:
@@ -42,8 +49,18 @@ def detect_runtime() -> str:
 
 if not is_colab():
     try:
-        from dotenv import load_dotenv
-        load_dotenv()
+        from dotenv import find_dotenv, load_dotenv
+
+        dotenv_file = find_dotenv('.env', usecwd=True)
+        if dotenv_file:
+            load_dotenv(dotenv_file, override=True)
+        else:
+            #procura o .env na pasta acima (é o meu caso)
+            script_dir = Path(__file__).resolve().parent
+            for candidate in (script_dir / '.env', script_dir.parent / '.env'):
+                if candidate.exists():
+                    load_dotenv(candidate, override=True)
+                    break
     except Exception:
         pass
 
@@ -69,7 +86,20 @@ CONFIG = {
     'email_username': os.getenv('EMAIL_USERNAME', ''),
     'email_password': os.getenv('EMAIL_PASSWORD', ''),
     'github_secret_name': os.getenv('GITHUB_SECRET_NAME', '').strip(),
+
+    'mongo_uri': os.getenv('MONGO_URI', '').strip(),
+    'mongo_enabled': _env_bool('MONGO_ENABLED', 'false') or bool(os.getenv('MONGO_URI', '').strip()),
+    'mongo_db': os.getenv('MONGO_DB', 'pi_water').strip(),
+    'mongo_collection': os.getenv('MONGO_COLLECTION', 'water_records').strip(),
+    'mongo_app_name': os.getenv('MONGO_APP_NAME', 'pip-water').strip(),
+    'mongo_server_selection_timeout_ms': int(os.getenv('MONGO_SERVER_SELECTION_TIMEOUT_MS', '10000')),
 }
+
+print('Runtime:', detect_runtime())
+print('Repo target:', f"{CONFIG['repo_owner']}/{CONFIG['repo_name']}/{CONFIG['repo_folder']}")
+print('Output folder:', CONFIG['output_folder'])
+print('Mongo enabled:', CONFIG['mongo_enabled']) #flag que indica se quero usar o mongo
+print('Mongo URI set:', bool(CONFIG['mongo_uri'])) #flag que indica se a URI do mongo está configurada
 
 
 @dataclass
@@ -78,18 +108,22 @@ class PipelineContext:
     run_id: str
     started_at: str
 
+#####################################################################
+##---------------------Obter GITHUB_TOKEN -------------------------##
 
-def load_colab_secret(secret_name: str):
+
+##--Tenta obter segredo do ambiente do Colab-----------------------##
+def load_colab_secret(secret_name: str): 
     if not is_colab():
         return None
     try:
-        from google.colab import userdata  # type: ignore
+        from google.colab import userdata  #tenta interpretar segredo como JSON
         raw = userdata.get(secret_name)
         if not raw:
             return None
         try:
             return json.loads(raw)
-        except Exception:
+        except Exception: #se não for JSON, retorna como string simples
             return {'token': str(raw).strip()}
     except Exception:
         return None
@@ -97,21 +131,21 @@ def load_colab_secret(secret_name: str):
 
 def get_github_token() -> str | None:
     token = (os.getenv('GITHUB_TOKEN') or '').strip()
-    if token:
+    if token: #1 try: variavel de ambiente GITHUB_TOKEN
         return token
 
     candidates = []
-    if CONFIG['github_secret_name']:
+    if CONFIG['github_secret_name']: #2 try: nomes possiveis de secrets
         candidates.append(CONFIG['github_secret_name'])
     candidates.extend([
-        'GITHUB_TOKEN',
+        "GITHUB_TOKEN",
         'github_token',
         'TO-github.json',
         'TO-github_token.json',
         'github_token.json',
     ])
 
-    for secret_name in candidates:
+    for secret_name in candidates: #tenta obter um por um do ambiente do Colab
         payload = load_colab_secret(secret_name)
         if not payload:
             continue
@@ -121,29 +155,38 @@ def get_github_token() -> str | None:
 
     return None
 
-
+##--controi os haders HTTP para chamdas API do GITHUB
 def headers(token: str | None) -> dict[str, str]:
     h = {'Accept': 'application/vnd.github+json'}
     if token:
         h['Authorization'] = f'Bearer {token}'
     return h
 
-
 TOKEN = get_github_token()
+print('GitHub token presente:', bool(TOKEN))
+
+##-------------------------------------------------------------------##
+
+
+
 
 
 def raw_url(file_path: str, branch: str) -> str:
     return f"https://raw.githubusercontent.com/{CONFIG['repo_owner']}/{CONFIG['repo_name']}/{branch}/{file_path}"
 
 
+
+
+#identificador da branch do repositorio-------------------------------------------------------------------------
 def branch_candidates() -> list[str]:
     preferred = CONFIG['repo_branch'].strip()
     values = [preferred, 'main', 'master']
     unique: list[str] = []
-    for value in values:
+    for value in values: #remove duplicados
         if value and value not in unique:
             unique.append(value)
     return unique
+
 
 
 def list_from_json_file_urls() -> list[dict[str, str]]:
@@ -307,6 +350,65 @@ def save_outputs(df: pd.DataFrame):
     }
 
 
+def _doc_hash(document: dict[str, Any]) -> str:
+    payload = json.dumps(document, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def save_to_mongodb(df: pd.DataFrame, run_id: str) -> dict[str, Any]:
+    if not CONFIG['mongo_enabled']:
+        return {'enabled': False, 'status': 'disabled'}
+
+    if not CONFIG['mongo_uri']:
+        return {'enabled': True, 'status': 'error', 'error': 'MONGO_URI is empty.'}
+
+    if MongoClient is None or UpdateOne is None:
+        return {
+            'enabled': True,
+            'status': 'error',
+            'error': 'pymongo is not installed. Install dependencies from requirements.txt.',
+        }
+
+    records = json.loads(df.to_json(orient='records', force_ascii=False, date_format='iso'))
+    if not records:
+        return {'enabled': True, 'status': 'ok', 'inserted': 0, 'duplicates': 0, 'total': 0}
+
+    operations = []
+    for record in records:
+        doc = dict(record)
+        doc['_saved_at'] = datetime.now(timezone.utc).isoformat()
+        doc['_last_run_id'] = run_id
+        doc_id = _doc_hash(doc)
+        doc['_id'] = doc_id
+        operations.append(UpdateOne({'_id': doc_id}, {'$setOnInsert': doc}, upsert=True))
+
+    client = MongoClient(
+        CONFIG['mongo_uri'],
+        appname=CONFIG['mongo_app_name'] or 'pip-water',
+        serverSelectionTimeoutMS=CONFIG['mongo_server_selection_timeout_ms'],
+    )
+    try:
+        client.admin.command('ping')
+        collection = client[CONFIG['mongo_db']][CONFIG['mongo_collection']]
+        result = collection.bulk_write(operations, ordered=False)
+
+        inserted = int(getattr(result, 'upserted_count', 0) or 0)
+        total = len(operations)
+        duplicates = total - inserted
+
+        return {
+            'enabled': True,
+            'status': 'ok',
+            'db': CONFIG['mongo_db'],
+            'collection': CONFIG['mongo_collection'],
+            'inserted': inserted,
+            'duplicates': duplicates,
+            'total': total,
+        }
+    finally:
+        client.close()
+
+
 def list_candidate_files() -> tuple[list[dict[str, str]], str]:
     files = list_from_json_file_urls()
     mode = 'JSON_FILE_URLS'
@@ -448,6 +550,9 @@ def run_pipeline() -> dict[str, Any]:
         outputs = save_outputs(df)
         close_phase('save_outputs')
 
+        mongo_result = save_to_mongodb(df, context.run_id)
+        close_phase('save_mongodb')
+
         elapsed = round(time.perf_counter() - started, 2)
         result = {
             'status': 'ok',
@@ -462,6 +567,7 @@ def run_pipeline() -> dict[str, Any]:
             'elapsed_seconds': elapsed,
             'performance': {'phase_seconds': phase_seconds},
             'output': outputs,
+            'mongodb': mongo_result,
             'sample': df.head(5).to_dict(orient='records'),
         }
 

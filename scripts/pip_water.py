@@ -1,8 +1,5 @@
 # -*- coding: utf-8 -*-
-"""pip_water.py
-
-Pipeline de ingestao de dados de qualidade da agua (Aqualog).
-"""
+"""pip_water.py"""
 
 import json
 import os

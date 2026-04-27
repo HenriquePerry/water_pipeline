@@ -24,6 +24,16 @@ except Exception:  # pragma: no cover - optional dependency at runtime
     MongoClient = None  # type: ignore[assignment]
     UpdateOne = None  # type: ignore[assignment]
 
+try:
+    import pymysql
+except Exception:  # pragma: no cover - optional dependency at runtime
+    pymysql = None  # type: ignore[assignment]
+
+try:
+    import certifi
+except Exception:  # pragma: no cover - optional dependency at runtime
+    certifi = None  # type: ignore[assignment]
+
 
 def _env_bool(name: str, default: str = 'false') -> bool:
     return os.getenv(name, default).strip().lower() in {'1', 'true', 'yes', 'on'}
@@ -93,6 +103,22 @@ CONFIG = {
     'mongo_collection': os.getenv('MONGO_COLLECTION', 'water_records').strip(),
     'mongo_app_name': os.getenv('MONGO_APP_NAME', 'pip-water').strip(),
     'mongo_server_selection_timeout_ms': int(os.getenv('MONGO_SERVER_SELECTION_TIMEOUT_MS', '10000')),
+
+    'tidb_host': os.getenv('TIDB_HOST', '').strip(),
+    'tidb_port': int(os.getenv('TIDB_PORT', '4000')),
+    'tidb_user': os.getenv('TIDB_USER', '').strip(),
+    'tidb_password': os.getenv('TIDB_PASSWORD', '').strip(),
+    'tidb_database': os.getenv('TIDB_DATABASE', 'pi_water').strip(),
+    'tidb_table': os.getenv('TIDB_TABLE', 'water_records').strip(),
+    'tidb_ca_path': os.getenv('TIDB_CA_PATH', '').strip(),
+    'tidb_connect_timeout': int(os.getenv('TIDB_CONNECT_TIMEOUT', '10')),
+    'tidb_enabled': _env_bool('TIDB_ENABLED', 'false') or bool(
+        os.getenv('TIDB_HOST', '').strip() and
+        os.getenv('TIDB_USER', '').strip() and
+        os.getenv('TIDB_PASSWORD', '').strip() and
+        os.getenv('TIDB_DATABASE', 'pi_water').strip() and
+        os.getenv('TIDB_TABLE', 'water_records').strip()
+    ),
 }
 
 print('Runtime:', detect_runtime())
@@ -100,6 +126,8 @@ print('Repo target:', f"{CONFIG['repo_owner']}/{CONFIG['repo_name']}/{CONFIG['re
 print('Output folder:', CONFIG['output_folder'])
 print('Mongo enabled:', CONFIG['mongo_enabled']) #flag que indica se quero usar o mongo
 print('Mongo URI set:', bool(CONFIG['mongo_uri'])) #flag que indica se a URI do mongo está configurada
+print('TiDB enabled:', CONFIG['tidb_enabled'])
+print('TiDB host set:', bool(CONFIG['tidb_host']))
 
 
 @dataclass
@@ -355,6 +383,27 @@ def _doc_hash(document: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
 
+def _stable_record_identity(record: dict[str, Any]) -> str:
+    identity = dict(record)
+    for volatile_key in ('_ingested_at', '_run_id', '_saved_at', '_last_run_id'):
+        identity.pop(volatile_key, None)
+    return _doc_hash(identity)
+
+
+def _utc_sql_datetime(value: str | datetime | None) -> datetime:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    if not value:
+        return datetime.utcnow()
+    try:
+        parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except Exception:
+        return datetime.utcnow()
+
+
 def save_to_mongodb(df: pd.DataFrame, run_id: str) -> dict[str, Any]:
     if not CONFIG['mongo_enabled']:
         return {'enabled': False, 'status': 'disabled'}
@@ -378,35 +427,165 @@ def save_to_mongodb(df: pd.DataFrame, run_id: str) -> dict[str, Any]:
         doc = dict(record)
         doc['_saved_at'] = datetime.now(timezone.utc).isoformat()
         doc['_last_run_id'] = run_id
-        doc_id = _doc_hash(doc)
+        doc_id = _stable_record_identity(doc)
         doc['_id'] = doc_id
         operations.append(UpdateOne({'_id': doc_id}, {'$setOnInsert': doc}, upsert=True))
 
-    client = MongoClient(
-        CONFIG['mongo_uri'],
-        appname=CONFIG['mongo_app_name'] or 'pip-water',
-        serverSelectionTimeoutMS=CONFIG['mongo_server_selection_timeout_ms'],
-    )
     try:
-        client.admin.command('ping')
-        collection = client[CONFIG['mongo_db']][CONFIG['mongo_collection']]
-        result = collection.bulk_write(operations, ordered=False)
+        client_kwargs: dict[str, Any] = {
+            'appname': CONFIG['mongo_app_name'] or 'pip-water',
+            'serverSelectionTimeoutMS': CONFIG['mongo_server_selection_timeout_ms'],
+        }
+        if certifi is not None:
+            client_kwargs['tlsCAFile'] = certifi.where()
 
-        inserted = int(getattr(result, 'upserted_count', 0) or 0)
-        total = len(operations)
-        duplicates = total - inserted
+        client = MongoClient(CONFIG['mongo_uri'], **client_kwargs)
+        try:
+            client.admin.command('ping')
+            collection = client[CONFIG['mongo_db']][CONFIG['mongo_collection']]
+            result = collection.bulk_write(operations, ordered=False)
+
+            inserted = int(getattr(result, 'upserted_count', 0) or 0)
+            total = len(operations)
+            duplicates = total - inserted
+
+            return {
+                'enabled': True,
+                'status': 'ok',
+                'db': CONFIG['mongo_db'],
+                'collection': CONFIG['mongo_collection'],
+                'inserted': inserted,
+                'duplicates': duplicates,
+                'total': total,
+            }
+        except Exception as exc:
+            return {
+                'enabled': True,
+                'status': 'error',
+                'error': str(exc),
+                'db': CONFIG['mongo_db'],
+                'collection': CONFIG['mongo_collection'],
+            }
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def save_to_tidb(df: pd.DataFrame, run_id: str) -> dict[str, Any]:
+    if not CONFIG['tidb_enabled']:
+        return {'enabled': False, 'status': 'disabled'}
+
+    if pymysql is None:
+        return {
+            'enabled': True,
+            'status': 'error',
+            'error': 'pymysql is not installed. Install dependencies from requirements.txt.',
+        }
+
+    required = ['tidb_host', 'tidb_user', 'tidb_password', 'tidb_database', 'tidb_table']
+    missing = [name for name in required if not CONFIG.get(name)]
+    if missing:
+        return {
+            'enabled': True,
+            'status': 'error',
+            'error': f"Missing TiDB settings: {', '.join(missing)}",
+        }
+
+    if 'tidbcloud' in CONFIG['tidb_host'].lower() and not CONFIG['tidb_ca_path']:
+        return {
+            'enabled': True,
+            'status': 'error',
+            'error': 'TIDB_CA_PATH is required for TiDB Cloud TLS connections.',
+        }
+
+    records = json.loads(df.to_json(orient='records', force_ascii=False, date_format='iso'))
+    if not records:
+        return {'enabled': True, 'status': 'ok', 'written': 0, 'table_count': 0}
+
+    ssl_kwargs = {'ca': CONFIG['tidb_ca_path']} if CONFIG['tidb_ca_path'] else None
+    connection = pymysql.connect(
+        host=CONFIG['tidb_host'],
+        port=CONFIG['tidb_port'],
+        user=CONFIG['tidb_user'],
+        password=CONFIG['tidb_password'],
+        autocommit=False,
+        charset='utf8mb4',
+        connect_timeout=CONFIG['tidb_connect_timeout'],
+        ssl=ssl_kwargs,
+    )
+
+    create_database_sql = f"CREATE DATABASE IF NOT EXISTS `{CONFIG['tidb_database']}`"
+    create_table_sql = f"""
+        CREATE TABLE IF NOT EXISTS `{CONFIG['tidb_table']}` (
+            `id` VARCHAR(64) NOT NULL,
+            `run_id` VARCHAR(32) NOT NULL,
+            `source_file` VARCHAR(255) NOT NULL,
+            `ingested_at` DATETIME(6) NULL,
+            `saved_at` DATETIME(6) NOT NULL,
+            `payload_json` JSON NOT NULL,
+            PRIMARY KEY (`id`),
+            KEY `idx_run_id` (`run_id`),
+            KEY `idx_source_file` (`source_file`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+    """
+    insert_sql = f"""
+        INSERT INTO `{CONFIG['tidb_table']}`
+            (`id`, `run_id`, `source_file`, `ingested_at`, `saved_at`, `payload_json`)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            `run_id` = VALUES(`run_id`),
+            `source_file` = VALUES(`source_file`),
+            `ingested_at` = VALUES(`ingested_at`),
+            `saved_at` = VALUES(`saved_at`),
+            `payload_json` = VALUES(`payload_json`)
+    """
+
+    rows = []
+    saved_at = _utc_sql_datetime(None)
+    for record in records:
+        payload = dict(record)
+        row_id = _stable_record_identity(payload)
+        rows.append(
+            (
+                row_id,
+                run_id,
+                str(payload.get('_source_file', '')),
+                _utc_sql_datetime(payload.get('_ingested_at')),
+                saved_at,
+                json.dumps(payload, ensure_ascii=False, default=str),
+            )
+        )
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(create_database_sql)
+            connection.select_db(CONFIG['tidb_database'])
+            cursor.execute(create_table_sql)
+            cursor.executemany(insert_sql, rows)
+            connection.commit()
+
+            cursor.execute(f"SELECT COUNT(*) FROM `{CONFIG['tidb_table']}`")
+            table_count = int(cursor.fetchone()[0] or 0)
 
         return {
             'enabled': True,
             'status': 'ok',
-            'db': CONFIG['mongo_db'],
-            'collection': CONFIG['mongo_collection'],
-            'inserted': inserted,
-            'duplicates': duplicates,
-            'total': total,
+            'db': CONFIG['tidb_database'],
+            'table': CONFIG['tidb_table'],
+            'written': len(rows),
+            'table_count': table_count,
+        }
+    except Exception as exc:
+        connection.rollback()
+        return {
+            'enabled': True,
+            'status': 'error',
+            'error': str(exc),
         }
     finally:
-        client.close()
+        connection.close()
 
 
 def list_candidate_files() -> tuple[list[dict[str, str]], str]:
@@ -553,6 +732,9 @@ def run_pipeline() -> dict[str, Any]:
         mongo_result = save_to_mongodb(df, context.run_id)
         close_phase('save_mongodb')
 
+        tidb_result = save_to_tidb(df, context.run_id)
+        close_phase('save_tidb')
+
         elapsed = round(time.perf_counter() - started, 2)
         result = {
             'status': 'ok',
@@ -568,6 +750,7 @@ def run_pipeline() -> dict[str, Any]:
             'performance': {'phase_seconds': phase_seconds},
             'output': outputs,
             'mongodb': mongo_result,
+            'tidb': tidb_result,
             'sample': df.head(5).to_dict(orient='records'),
         }
 

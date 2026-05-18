@@ -59,6 +59,27 @@ python scripts/pip_water.py
 
 O script faz a mesma pipeline do notebook: descobre ficheiros, normaliza dados, grava os outputs, persiste em Mongo/TiDB/CrateDB e produz o `water_result.json`.
 
+### Flask API
+
+```bash
+python app.py
+```
+
+Endpoints disponíveis:
+
+- `GET /health` - valida se o serviço está ativo
+- `GET /config` - mostra configuração ativa sem segredos
+- `POST /run` - executa a pipeline uma vez e devolve o resultado JSON
+
+Exemplos de teste:
+
+```bash
+curl http://127.0.0.1:5000/health
+curl http://127.0.0.1:5000/config
+curl -X POST http://127.0.0.1:5000/run -H "Content-Type: application/json" -d "{}"
+curl -X POST http://127.0.0.1:5000/run -H "Content-Type: application/json" -d "{\"send_email\": true}"
+```
+
 ## Como detetar anomalias
 
 Para validar a deteção de anomalias com dados de teste:

@@ -1163,7 +1163,7 @@ def send_email_summary(result: dict[str, Any]) -> None:
     if error_text:
         text_body += f"Error: {error_text}\n"
 
-        html_body = f"""
+    html_body = f"""
     <html>
       <body style=\"font-family: Arial, sans-serif; color: #222;\">
         <h3>PIP Water - Resumo da Execução</h3>

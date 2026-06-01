@@ -78,9 +78,16 @@ Exemplos de teste:
 
 ```bash
 curl http://127.0.0.1:5000/health
+
 curl http://127.0.0.1:5000/config
+
 curl -X POST http://127.0.0.1:5000/run -H "Content-Type: application/json" -d "{}"
-curl -X POST http://127.0.0.1:5000/run -H "Content-Type: application/json" -d "{\"send_email\": true}"
+
+Invoke-RestMethod `
+  -Method POST `
+  -Uri "http://127.0.0.1:5000/run" `
+  -ContentType "application/json" `
+  -Body '{"send_email": true}'
 ```
 
 ### Deploy no Render

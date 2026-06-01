@@ -6,6 +6,7 @@ import html as ihtml
 import json
 import os
 import re
+import random
 import smtplib
 import ssl
 import time
@@ -64,6 +65,8 @@ def is_render() -> bool:
 def detect_runtime() -> str:
     if is_colab():
         return 'google-colab'
+    if is_render():
+        return 'render'
     if os.getenv('AIRFLOW_HOME') or os.getenv('AIRFLOW_CTX_DAG_ID'):
         return 'airflow'
     if os.getenv('FLASK_ENV') or os.getenv('WERKZEUG_RUN_MAIN'):
@@ -197,6 +200,7 @@ CONFIG = {
     'anomaly_threshold_ratio': float(os.getenv('ANOMALY_THRESHOLD_RATIO', '0.8')),
     'anomaly_lookback_days': int(os.getenv('ANOMALY_LOOKBACK_DAYS', '2')),
     'max_files': int(os.getenv('MAX_FILES', '0')),
+    'repo_sample_size': int(os.getenv('REPO_SAMPLE_SIZE', '30')),
     'skip_db_writes': _env_bool('SKIP_DB_WRITES', 'false'),
 }
 
@@ -374,6 +378,13 @@ def apply_date_window(files: list[dict[str, str]]) -> list[dict[str, str]]:
         if file_date is None or (start_date <= file_date <= end_date):
             selected.append(file_info)
     return selected
+
+
+def limit_repo_files_randomly(files: list[dict[str, str]]) -> list[dict[str, str]]:
+    sample_size = int(CONFIG.get('repo_sample_size', 30) or 30)
+    if sample_size <= 0 or len(files) <= sample_size:
+        return files
+    return random.sample(files, sample_size)
 
 
 # ============================================================
@@ -1021,23 +1032,29 @@ def build_meter_anomaly_report(current_df: pd.DataFrame, run_id: str, lookback_d
 
     details: list[dict[str, Any]] = []
     for row in flagged.to_dict(orient='records'):
+        expected_count = round(float(row.get('expected_count') or 0.0), 2)
+        current_count = int(row.get('current_count') or 0)
+        missing_count = max(0, int(round(expected_count - current_count)))
+        lost_percentage = round((missing_count / expected_count) * 100, 1) if expected_count else 0.0
         details.append(
             {
                 'contador': row.get('contador', ''),
                 'device': row.get('device', ''),
                 'alias': row.get('alias', ''),
-                'current_count': int(row.get('current_count') or 0),
-                'expected_count': round(float(row.get('expected_count') or 0.0), 2),
+                'current_count': current_count,
+                'expected_count': expected_count,
+                'missing_count': missing_count,
+                'lost_percentage': lost_percentage,
+                'expected_total_count': expected_count,
+                'missing_total_count': missing_count,
+                'lost_total_percentage': lost_percentage,
                 'history_avg': round(float(row.get('history_avg') or 0.0), 2),
                 'history_median': round(float(row.get('history_median') or 0.0), 2),
                 'history_min': int(row.get('history_min') or 0),
                 'history_max': int(row.get('history_max') or 0),
                 'history_days': int(row.get('history_days') or 0),
                 'ratio': row.get('ratio'),
-                'missing_readings': max(
-                    0,
-                    int(round(float(row.get('expected_count') or 0.0) - float(row.get('current_count') or 0))),
-                ),
+                'missing_readings': missing_count,
             }
         )
 
@@ -1073,6 +1090,8 @@ def list_candidate_files() -> tuple[list[dict[str, str]], str]:
         files = list_from_github(TOKEN)
         mode = 'GITHUB_API'
     files = apply_date_window(files)
+    if mode in {'REPO_JSON_FILES', 'GITHUB_API'}:
+        files = limit_repo_files_randomly(files)
     return files, mode
 
 
@@ -1093,18 +1112,20 @@ def _build_anomaly_table_html(anomaly_report: dict[str, Any] | None) -> str:
     table_rows: list[str] = []
     for item in top_details:
         contador = str(item.get('contador', ''))
-        expected = int(round(float(item.get('expected_count', 0) or 0)))
+        expected = float(item.get('expected_total_count', item.get('expected_count', 0)) or 0)
         current = int(item.get('current_count', 0) or 0)
         ratio = item.get('ratio')
         ratio_str = f"{float(ratio) * 100:.1f}%" if ratio is not None else '-'
-        missing = int(item.get('missing_readings', max(0, expected - current)) or 0)
+        missing = int(item.get('missing_total_count', item.get('missing_readings', max(0, round(expected - current)))) or 0)
+        lost_percentage = float(item.get('lost_total_percentage', item.get('lost_percentage', (missing / expected * 100) if expected else 0.0)) or 0.0)
 
         table_rows.append(
             "<tr>"
             f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:left'>{contador}</td>"
-            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right'>{expected}</td>"
+            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right'>{expected:.2f}</td>"
             f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right'>{current}</td>"
             f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right;color:#b00020'>{ratio_str}</td>"
+            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right;color:#b00020'>{lost_percentage:.1f}%</td>"
             f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right;color:#d9534f'>-{missing}</td>"
             "</tr>"
         )
@@ -1112,10 +1133,11 @@ def _build_anomaly_table_html(anomaly_report: dict[str, Any] | None) -> str:
     head = (
         "<tr>"
         "<th style='border:1px solid #ccc;padding:4px 6px;text-align:left;background:#f9f9f9;color:#d9534f'>Contador</th>"
-        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Esperado</th>"
+        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Contagem esperada</th>"
         "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Atual</th>"
         "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Racio %</th>"
-        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Faltas</th>"
+        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Percentagem perdida</th>"
+        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Soma em falta</th>"
         "</tr>"
     )
 
@@ -1352,14 +1374,21 @@ def send_email_summary(result: dict[str, Any]) -> None:
             return
 
     status = result.get('status', 'unknown')
-    subject = f"[PIP Water] {status.upper()} | {result.get('run_id', 'N/A')}"
+    runtime_label = str(result.get('runtime') or detect_runtime() or 'unknown').strip().lower()
+    subject = f"[PIP Water | {runtime_label}] {status.upper()} | {result.get('run_id', 'N/A')}"
     anomalies = result.get('anomalies', {}) or {}
     anom_count = int(anomalies.get('anomalous_counters', 0) or 0)
     profile_rows = _build_profile_rows_from_result(result)
     profile_table_html = _build_profile_table_html(profile_rows)
     anomaly_table_html = _build_anomaly_table_html(anomalies)
 
-    text_lines = [f"{task} | watch: {w:.2f} | proc: {p:.2f}" for task, w, p in profile_rows]
+    text_lines = [
+        f"Environment: {runtime_label}",
+        f"Run ID: {result.get('run_id', 'N/A')}",
+        f"Status: {status}",
+        "",
+    ]
+    text_lines.extend(f"{task} | watch: {w:.2f} | proc: {p:.2f}" for task, w, p in profile_rows)
 
     if anom_count > 0:
         text_lines.append(f"\n[ANOMALIAS] {anom_count} contador(es) com problema nos ultimos 2 dias")
@@ -1370,7 +1399,13 @@ def send_email_summary(result: dict[str, Any]) -> None:
 
     text_body = "\n".join(text_lines) + "\nEsta é uma mensagem automática."
 
-    html_body = "<html><body style='font-family:Montserrat,Arial,sans-serif'>" + profile_table_html
+    html_body = (
+        "<html><body style='font-family:Montserrat,Arial,sans-serif'>"
+        f"<p><b>Environment:</b> {ihtml.escape(runtime_label)}</p>"
+        f"<p><b>Run ID:</b> {ihtml.escape(str(result.get('run_id', 'N/A')))}</p>"
+        f"<p><b>Status:</b> {ihtml.escape(str(status).upper())}</p>"
+        + profile_table_html
+    )
     if anomaly_table_html:
         html_body += "<hr color=orange>" + anomaly_table_html
     if error_text:
@@ -1380,7 +1415,7 @@ def send_email_summary(result: dict[str, Any]) -> None:
     html_body += "</body></html>"
 
     preferred_backend = (CONFIG.get('email_backend') or 'smtp').strip().lower()
-    if preferred_backend == 'brevo' or is_render():
+    if preferred_backend == 'brevo' or runtime_label == 'render' or is_render():
         send_result = _send_email_via_brevo(subject, text_body, html_body, recipients)
         if send_result.get('status') != 'ok' and preferred_backend == 'brevo' and is_render():
             raise RuntimeError(send_result.get('error', 'Brevo email send failed.'))

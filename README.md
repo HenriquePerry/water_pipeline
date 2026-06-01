@@ -39,8 +39,9 @@ As credenciais e opções principais podem ser definidas em `.env` ou em variáv
 - `MONGO_URI`, `MONGO_DB`, `MONGO_COLLECTION`
 - `TIDB_HOST`, `TIDB_PORT`, `TIDB_USER`, `TIDB_PASSWORD`, `TIDB_DATABASE`, `TIDB_TABLE`, `TIDB_CA_PATH`
 - `CRATEDB_HOST`, `CRATEDB_PORT`, `CRATEDB_USER`, `CRATEDB_PASSWORD`, `CRATEDB_DATABASE`, `CRATEDB_TABLE`, `CRATEDB_SSLMODE`
-- `EMAIL_ENABLED`, `EMAIL_FROM`, `EMAIL_TO`, `EMAIL_USERNAME`, `EMAIL_PASSWORD`
-- `ANOMALY_THRESHOLD_RATIO` e `ANOMALY_LOOKBACK_DAYS`
+- `EMAIL_ENABLED`, `EMAIL_BACKEND`, `EMAIL_FROM`, `EMAIL_TO`, `EMAIL_USERNAME`, `EMAIL_PASSWORD`
+- `BREVO_API_KEY`, `BREVO_SENDER_NAME`, `BREVO_SENDER_EMAIL`
+- `ANOMALY_THRESHOLD_RATIO`, `ANOMALY_LOOKBACK_DAYS` e `REPO_SAMPLE_SIZE`
 
 ## Como executar
 
@@ -58,6 +59,8 @@ python scripts/pip_water.py
 ```
 
 O script faz a mesma pipeline do notebook: descobre ficheiros, normaliza dados, grava os outputs, persiste em Mongo/TiDB/CrateDB e produz o `water_result.json`.
+
+Por defeito, quando a origem é o repositório, a pipeline escolhe 30 ficheiros aleatórios antes de os ler. Podes alterar isso com `REPO_SAMPLE_SIZE`.
 
 ### Flask API
 
@@ -106,6 +109,8 @@ O Render bloqueia SMTP tradicional em várias portas. Para o deploy no Render, u
 - `BREVO_SENDER_EMAIL`
 
 Podes continuar a usar `EMAIL_TO` como lista de destinatários. Em modo local, podes deixar `EMAIL_BACKEND=smtp`.
+
+O email enviado pela pipeline inclui agora o ambiente detetado no assunto e no corpo, por exemplo: `google-colab`, `local`, `flask` ou `render`.
 
 ## Como detetar anomalias
 

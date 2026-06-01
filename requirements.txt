@@ -5,3 +5,4 @@ pymongo
 pymysql
 psycopg2-binary
 flask
+gunicorn

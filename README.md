@@ -80,6 +80,22 @@ curl -X POST http://127.0.0.1:5000/run -H "Content-Type: application/json" -d "{
 curl -X POST http://127.0.0.1:5000/run -H "Content-Type: application/json" -d "{\"send_email\": true}"
 ```
 
+### Deploy no Render
+
+Este projeto já inclui `render.yaml`, por isso podes criar um `Web Service` no Render apontando para o repositório e usar:
+
+- build: `pip install -r requirements.txt`
+- start: `gunicorn app:app`
+
+Configura as variáveis de ambiente no Render da mesma forma que no `.env` local, sobretudo:
+
+- `GITHUB_TOKEN`
+- `JSON_FILE_URLS`, `LOCAL_JSON_DIR` ou `REPO_JSON_FILES`
+- `EMAIL_ENABLED`, `EMAIL_FROM`, `EMAIL_TO`, `EMAIL_USERNAME`, `EMAIL_PASSWORD`
+- `MONGO_URI`, `TIDB_*`, `CRATEDB_*` se fores persistir na cloud
+
+No Render, o serviço usa a variável `PORT` automaticamente; a app já está preparada para isso.
+
 ## Como detetar anomalias
 
 Para validar a deteção de anomalias com dados de teste:

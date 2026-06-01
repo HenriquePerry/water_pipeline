@@ -2,6 +2,7 @@
 """pip_water.py"""
 
 import hashlib
+import html as ihtml
 import json
 import os
 import re
@@ -1121,6 +1122,138 @@ def _build_anomaly_table_html(anomaly_report: dict[str, Any] | None) -> str:
     return intro + table_html
 
 
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
+
+
+def _build_profile_rows_from_result(result: dict[str, Any]) -> list[tuple[str, float, float]]:
+    phase_seconds = ((result.get('performance') or {}).get('phase_seconds') or {})
+    rows: list[tuple[str, float, float]] = []
+
+    rows.append(('Pipeline started', 0.0, 0.0))
+
+    cumulative = 0.0
+    steps = [
+        ('file_discovery', 'File discovery'),
+        ('download_and_normalize', 'Download and normalize'),
+        ('transform', 'Transform'),
+        ('save_outputs', 'Save outputs'),
+        ('save_mongodb', 'Save MongoDB'),
+        ('save_tidb', 'Save TiDB'),
+        ('save_cratedb', 'Save CrateDB'),
+    ]
+
+    for key, label in steps:
+        cumulative += _safe_float(phase_seconds.get(key, 0.0))
+        rows.append((label, round(cumulative, 2), round(cumulative, 2)))
+
+        if key == 'save_mongodb':
+            mongo = result.get('mongodb') or {}
+            if mongo.get('enabled', False):
+                if mongo.get('status') == 'ok':
+                    rows.append(
+                        (
+                            f"... [mongodb] {mongo.get('collection', CONFIG['mongo_collection'])}: "
+                            f"inserted {mongo.get('inserted', 0)}, skipped {mongo.get('duplicates', 0)}",
+                            round(cumulative, 2),
+                            round(cumulative, 2),
+                        )
+                    )
+                elif mongo.get('status') == 'skipped':
+                    rows.append(('... [mongodb] skipped', round(cumulative, 2), round(cumulative, 2)))
+                else:
+                    rows.append(
+                        (
+                            f"... [mongodb] error: {mongo.get('error', 'unknown')}",
+                            round(cumulative, 2),
+                            round(cumulative, 2),
+                        )
+                    )
+
+        if key == 'save_tidb':
+            tidb = result.get('tidb') or {}
+            if tidb.get('enabled', False):
+                if tidb.get('status') == 'ok':
+                    rows.append(
+                        (
+                            f"... [tidb] {tidb.get('table', CONFIG['tidb_table'])}: "
+                            f"written {tidb.get('written', 0)}, rows in table {tidb.get('table_count', 0)}",
+                            round(cumulative, 2),
+                            round(cumulative, 2),
+                        )
+                    )
+                elif tidb.get('status') == 'skipped':
+                    rows.append(('... [tidb] skipped', round(cumulative, 2), round(cumulative, 2)))
+                else:
+                    rows.append(
+                        (
+                            f"... [tidb] error: {tidb.get('error', 'unknown')}",
+                            round(cumulative, 2),
+                            round(cumulative, 2),
+                        )
+                    )
+
+        if key == 'save_cratedb':
+            cratedb = result.get('cratedb') or {}
+            if cratedb.get('enabled', False):
+                if cratedb.get('status') == 'ok':
+                    rows.append(
+                        (
+                            f"... [cratedb] {cratedb.get('table', CONFIG['cratedb_table'])}: "
+                            f"written {cratedb.get('written', 0)}, rows in table {cratedb.get('table_count', 0)}",
+                            round(cumulative, 2),
+                            round(cumulative, 2),
+                        )
+                    )
+                elif cratedb.get('status') == 'skipped':
+                    rows.append(('... [cratedb] skipped', round(cumulative, 2), round(cumulative, 2)))
+                else:
+                    rows.append(
+                        (
+                            f"... [cratedb] error: {cratedb.get('error', 'unknown')}",
+                            round(cumulative, 2),
+                            round(cumulative, 2),
+                        )
+                    )
+
+    overall = round(cumulative, 2)
+    rows.append(('Overall pipeline', overall, overall))
+
+    elapsed = round(_safe_float(result.get('elapsed_seconds', overall)), 2)
+    rows.append(('Overall (before email):', elapsed, elapsed))
+    return rows
+
+
+def _build_profile_table_html(rows: list[tuple[str, float, float]]) -> str:
+    table_rows: list[str] = []
+    for task, watch_secs, proc_secs in rows:
+        table_rows.append(
+            "<tr>"
+            f"<td style='border:1px solid #666;padding:4px 6px;text-align:left'>{ihtml.escape(task)}</td>"
+            f"<td style='border:1px solid #666;padding:4px 6px;text-align:right'>{watch_secs:.2f}</td>"
+            f"<td style='border:1px solid #666;padding:4px 6px;text-align:right'>{proc_secs:.2f}</td>"
+            "</tr>"
+        )
+
+    head = (
+        "<tr>"
+        "<th style='border:1px solid #666;padding:4px 6px;text-align:left;background:#f2f2f2'>Task(s)</th>"
+        "<th style='border:1px solid #666;padding:4px 6px;text-align:right;background:#f2f2f2'>watch time (secs)</th>"
+        "<th style='border:1px solid #666;padding:4px 6px;text-align:right;background:#f2f2f2'>proc time (secs)</th>"
+        "</tr>"
+    )
+
+    return (
+        "<table style='border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#222'>"
+        + head
+        + ''.join(table_rows)
+        + "</table>"
+    )
+
+
 # ============================================================
 # Email summary
 # ============================================================
@@ -1140,49 +1273,29 @@ def send_email_summary(result: dict[str, Any]) -> None:
     subject = f"[PIP Water] {status.upper()} | {result.get('run_id', 'N/A')}"
     anomalies = result.get('anomalies', {}) or {}
     anom_count = int(anomalies.get('anomalous_counters', 0) or 0)
+    profile_rows = _build_profile_rows_from_result(result)
+    profile_table_html = _build_profile_table_html(profile_rows)
     anomaly_table_html = _build_anomaly_table_html(anomalies)
 
-    text_body = (
-        f"Status: {status}\n"
-        f"Run ID: {result.get('run_id', 'N/A')}\n"
-        f"Mode: {result.get('mode', 'N/A')}\n"
-        f"Files selected: {result.get('files_selected', 0)}\n"
-        f"Files OK: {result.get('files_ok', 0)}\n"
-        f"Files error: {result.get('files_error', 0)}\n"
-        f"Records: {result.get('records', 0)}\n"
-        f"Anomalous counters: {anom_count}\n"
-        f"Elapsed: {result.get('elapsed_seconds', 0)}s\n"
-        f"Output JSON: {result.get('output', {}).get('json_path', 'N/A')}\n"
-        f"Output CSV: {result.get('output', {}).get('csv_path', 'N/A')}\n"
-    )
+    text_lines = [f"{task} | watch: {w:.2f} | proc: {p:.2f}" for task, w, p in profile_rows]
 
     if anom_count > 0:
-        text_body += f"\n[ANOMALIAS] {anom_count} contador(es) com problema nos ultimos 2 dias\n"
+        text_lines.append(f"\n[ANOMALIAS] {anom_count} contador(es) com problema nos ultimos 2 dias")
 
     error_text = result.get('error')
     if error_text:
-        text_body += f"Error: {error_text}\n"
+        text_lines.append(f"Error: {error_text}")
 
-    html_body = f"""
-    <html>
-      <body style=\"font-family: Arial, sans-serif; color: #222;\">
-        <h3>PIP Water - Resumo da Execução</h3>
-        <p><b>Status:</b> {status.upper()}</p>
-        <p><b>Run ID:</b> {result.get('run_id', 'N/A')}</p>
-        <p><b>Mode:</b> {result.get('mode', 'N/A')}</p>
-        <p><b>Files selected:</b> {result.get('files_selected', 0)}</p>
-        <p><b>Files OK:</b> {result.get('files_ok', 0)}</p>
-        <p><b>Files error:</b> {result.get('files_error', 0)}</p>
-        <p><b>Records:</b> {result.get('records', 0)}</p>
-        <p><b>Anomalous counters:</b> {anom_count}</p>
-        <p><b>Elapsed:</b> {result.get('elapsed_seconds', 0)}s</p>
-        <p><b>Output JSON:</b> {result.get('output', {}).get('json_path', 'N/A')}</p>
-        <p><b>Output CSV:</b> {result.get('output', {}).get('csv_path', 'N/A')}</p>
-        {f'<p style="color:#b00020;"><b>Error:</b> {error_text}</p>' if error_text else ''}
-                {f'<hr color="orange">{anomaly_table_html}' if anomaly_table_html else ''}
-      </body>
-    </html>
-    """
+    text_body = "\n".join(text_lines) + "\nEsta é uma mensagem automática."
+
+    html_body = "<html><body style='font-family:Montserrat,Arial,sans-serif'>" + profile_table_html
+    if anomaly_table_html:
+        html_body += "<hr color=orange>" + anomaly_table_html
+    if error_text:
+        html_body += f"<hr color=orange><p style='color:#b00020'><b>Error:</b> {ihtml.escape(str(error_text))}</p>"
+    html_body += "<hr color=orange>"
+    html_body += "This message is an automated notification from PIP Water script/Flask pipeline"
+    html_body += "</body></html>"
 
     message = MIMEMultipart('alternative')
     message['Subject'] = subject

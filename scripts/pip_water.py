@@ -57,6 +57,10 @@ def is_colab() -> bool:
         return False
 
 
+def is_render() -> bool:
+    return bool(os.getenv('RENDER') or os.getenv('RENDER_SERVICE_ID') or os.getenv('RENDER_EXTERNAL_URL'))
+
+
 def detect_runtime() -> str:
     if is_colab():
         return 'google-colab'
@@ -94,6 +98,10 @@ def env_or_colab_secret(name: str, default: str = '') -> str:
         return raw_text
     except Exception:
         return default
+
+
+def _env_or_default(name: str, default: str = '') -> str:
+    return (os.getenv(name) or default).strip()
 
 
 if not is_colab():
@@ -154,6 +162,10 @@ CONFIG = {
     'email_to': os.getenv('EMAIL_TO', ''),
     'email_username': os.getenv('EMAIL_USERNAME', ''),
     'email_password': os.getenv('EMAIL_PASSWORD', ''),
+    'email_backend': _env_or_default('EMAIL_BACKEND', 'brevo' if is_render() else 'smtp'),
+    'brevo_api_key': _env_or_default('BREVO_API_KEY', ''),
+    'brevo_sender_name': _env_or_default('BREVO_SENDER_NAME', ''),
+    'brevo_sender_email': _env_or_default('BREVO_SENDER_EMAIL', ''),
     'github_secret_name': os.getenv('GITHUB_SECRET_NAME', '').strip(),
     'mongo_uri': mongo_uri_value,
     'mongo_enabled': _env_bool('MONGO_ENABLED', 'false') or bool(mongo_uri_value),
@@ -1254,6 +1266,75 @@ def _build_profile_table_html(rows: list[tuple[str, float, float]]) -> str:
     )
 
 
+def _send_email_via_brevo(subject: str, text_body: str, html_body: str, recipients: list[str]) -> dict[str, Any]:
+    api_key = CONFIG.get('brevo_api_key', '').strip()
+    sender_email = (CONFIG.get('brevo_sender_email') or CONFIG.get('email_from') or '').strip()
+    sender_name = (CONFIG.get('brevo_sender_name') or 'PIP Water').strip()
+
+    if not api_key:
+        return {'status': 'error', 'error': 'BREVO_API_KEY is missing.'}
+    if not sender_email:
+        return {'status': 'error', 'error': 'BREVO_SENDER_EMAIL (or EMAIL_FROM) is missing.'}
+    if not recipients:
+        return {'status': 'error', 'error': 'No recipients configured.'}
+
+    payload = {
+        'sender': {'name': sender_name, 'email': sender_email},
+        'to': [{'email': item} for item in recipients],
+        'subject': subject,
+        'textContent': text_body,
+        'htmlContent': html_body,
+    }
+
+    response = requests.post(
+        'https://api.brevo.com/v3/smtp/email',
+        headers={
+            'accept': 'application/json',
+            'content-type': 'application/json',
+            'api-key': api_key,
+        },
+        json=payload,
+        timeout=CONFIG['request_timeout'],
+    )
+
+    if response.ok:
+        return {'status': 'ok', 'provider': 'brevo', 'response': response.json() if response.content else {}}
+
+    return {
+        'status': 'error',
+        'provider': 'brevo',
+        'error': f'{response.status_code} {response.text[:500]}',
+    }
+
+
+def _send_email_via_smtp(subject: str, text_body: str, html_body: str, recipients: list[str]) -> dict[str, Any]:
+    if not CONFIG['email_from'] or not CONFIG['email_username'] or not CONFIG['email_password']:
+        return {'status': 'error', 'error': 'SMTP credentials are incomplete.'}
+
+    message = MIMEMultipart('alternative')
+    message['Subject'] = subject
+    message['From'] = CONFIG['email_from']
+    message['To'] = ', '.join(recipients)
+    message.attach(MIMEText(text_body, 'plain'))
+    message.attach(MIMEText(html_body, 'html'))
+
+    ssl_context = ssl.create_default_context()
+    smtp_host = CONFIG['email_smtp_host']
+    smtp_port = CONFIG['email_smtp_port']
+
+    if smtp_port == 465:
+        with smtplib.SMTP_SSL(smtp_host, smtp_port, context=ssl_context) as server:
+            server.login(CONFIG['email_username'], CONFIG['email_password'])
+            server.sendmail(CONFIG['email_from'], recipients, message.as_string())
+    else:
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls(context=ssl_context)
+            server.login(CONFIG['email_username'], CONFIG['email_password'])
+            server.sendmail(CONFIG['email_from'], recipients, message.as_string())
+
+    return {'status': 'ok', 'provider': 'smtp', 'smtp_host': smtp_host, 'smtp_port': smtp_port}
+
+
 # ============================================================
 # Email summary
 # ============================================================
@@ -1267,7 +1348,8 @@ def send_email_summary(result: dict[str, Any]) -> None:
     if not recipients:
         return
     if not CONFIG['email_from'] or not CONFIG['email_username'] or not CONFIG['email_password']:
-        return
+        if CONFIG.get('email_backend') != 'brevo' or not CONFIG.get('brevo_api_key'):
+            return
 
     status = result.get('status', 'unknown')
     subject = f"[PIP Water] {status.upper()} | {result.get('run_id', 'N/A')}"
@@ -1297,23 +1379,18 @@ def send_email_summary(result: dict[str, Any]) -> None:
     html_body += "This message is an automated notification from PIP Water script/Flask pipeline"
     html_body += "</body></html>"
 
-    message = MIMEMultipart('alternative')
-    message['Subject'] = subject
-    message['From'] = CONFIG['email_from']
-    message['To'] = ', '.join(recipients)
-    message.attach(MIMEText(text_body, 'plain'))
-    message.attach(MIMEText(html_body, 'html'))
+    preferred_backend = (CONFIG.get('email_backend') or 'smtp').strip().lower()
+    if preferred_backend == 'brevo' or is_render():
+        send_result = _send_email_via_brevo(subject, text_body, html_body, recipients)
+        if send_result.get('status') != 'ok' and preferred_backend == 'brevo' and is_render():
+            raise RuntimeError(send_result.get('error', 'Brevo email send failed.'))
+        if send_result.get('status') != 'ok':
+            raise RuntimeError(send_result.get('error', 'Email send failed.'))
+        return
 
-    ssl_context = ssl.create_default_context()
-    if CONFIG['email_smtp_port'] == 465:
-        with smtplib.SMTP_SSL(CONFIG['email_smtp_host'], CONFIG['email_smtp_port'], context=ssl_context) as server:
-            server.login(CONFIG['email_username'], CONFIG['email_password'])
-            server.sendmail(CONFIG['email_from'], recipients, message.as_string())
-    else:
-        with smtplib.SMTP(CONFIG['email_smtp_host'], CONFIG['email_smtp_port']) as server:
-            server.starttls(context=ssl_context)
-            server.login(CONFIG['email_username'], CONFIG['email_password'])
-            server.sendmail(CONFIG['email_from'], recipients, message.as_string())
+    send_result = _send_email_via_smtp(subject, text_body, html_body, recipients)
+    if send_result.get('status') != 'ok':
+        raise RuntimeError(send_result.get('error', 'SMTP email send failed.'))
 
 
 # ============================================================

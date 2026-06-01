@@ -12,20 +12,20 @@ app = Flask(__name__)
 
 def _email_readiness() -> dict:
     recipients = [item.strip() for item in str(CONFIG.get('email_to', '')).split(',') if item.strip()]
+    backend = str(CONFIG.get('email_backend', 'smtp')).strip().lower()
+    brevo_ready = bool(CONFIG.get('brevo_api_key')) and bool(CONFIG.get('brevo_sender_email') or CONFIG.get('email_from'))
     checks = {
         'email_enabled': bool(CONFIG.get('email_enabled')),
-        'email_from_set': bool(CONFIG.get('email_from')),
-        'email_username_set': bool(CONFIG.get('email_username')),
-        'email_password_set': bool(CONFIG.get('email_password')),
+        'email_backend': backend,
+        'smtp_ready': bool(CONFIG.get('email_from')) and bool(CONFIG.get('email_username')) and bool(CONFIG.get('email_password')),
+        'brevo_ready': brevo_ready,
         'email_recipients_count': len(recipients),
     }
     checks['ready'] = all(
         [
             checks['email_enabled'],
-            checks['email_from_set'],
-            checks['email_username_set'],
-            checks['email_password_set'],
             checks['email_recipients_count'] > 0,
+            checks['brevo_ready'] if backend == 'brevo' or os.getenv('RENDER') else checks['smtp_ready'],
         ]
     )
     return checks
@@ -82,10 +82,10 @@ def config_snapshot() -> tuple[dict, int]:
         'tidb_enabled': bool(CONFIG.get('tidb_enabled')),
         'cratedb_enabled': bool(CONFIG.get('cratedb_enabled')),
         'email_enabled': bool(CONFIG.get('email_enabled')),
-        'email_from_set': bool(CONFIG.get('email_from')),
+        'email_backend': str(CONFIG.get('email_backend', 'smtp')).strip().lower(),
         'email_to_count': len([item.strip() for item in str(CONFIG.get('email_to', '')).split(',') if item.strip()]),
-        'email_username_set': bool(CONFIG.get('email_username')),
-        'email_password_set': bool(CONFIG.get('email_password')),
+        'smtp_ready': bool(CONFIG.get('email_from')) and bool(CONFIG.get('email_username')) and bool(CONFIG.get('email_password')),
+        'brevo_ready': bool(CONFIG.get('brevo_api_key')) and bool(CONFIG.get('brevo_sender_email') or CONFIG.get('email_from')),
     }, 200
 
 

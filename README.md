@@ -96,6 +96,17 @@ Configura as variáveis de ambiente no Render da mesma forma que no `.env` local
 
 No Render, o serviço usa a variável `PORT` automaticamente; a app já está preparada para isso.
 
+### Email no Render com Brevo
+
+O Render bloqueia SMTP tradicional em várias portas. Para o deploy no Render, usa o backend `brevo` por API HTTPS:
+
+- `EMAIL_BACKEND=brevo`
+- `BREVO_API_KEY`
+- `BREVO_SENDER_NAME`
+- `BREVO_SENDER_EMAIL`
+
+Podes continuar a usar `EMAIL_TO` como lista de destinatários. Em modo local, podes deixar `EMAIL_BACKEND=smtp`.
+
 ## Como detetar anomalias
 
 Para validar a deteção de anomalias com dados de teste:

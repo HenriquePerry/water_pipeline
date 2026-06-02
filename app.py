@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import os
+
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request
-
 from scripts.pip_water import CONFIG, run_pipeline, send_email_summary
 
 app = Flask(__name__)
+
+
+def _env_bool(name: str, default: str = 'false') -> bool:
+    return str(os.getenv(name, default)).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _request_runtime_label() -> str:
+    return 'render' if os.getenv('RENDER') or os.getenv('RENDER_SERVICE_ID') or os.getenv('RENDER_EXTERNAL_URL') else 'flask'
 
 
 def _email_readiness() -> dict:
@@ -83,9 +91,25 @@ def run_once() -> tuple[dict, int]:
     """
 
     payload = request.get_json(silent=True) or {}
-    send_email = bool(payload.get('send_email', False))
+    send_email_default = _env_bool('RUN_SEND_EMAIL_DEFAULT', 'true')
+    send_email_raw = payload.get('send_email')
+    if send_email_raw is None:
+        send_email = send_email_default
+    elif isinstance(send_email_raw, str):
+        send_email = send_email_raw.strip().lower() in {'1', 'true', 'yes', 'on'}
+    else:
+        send_email = bool(send_email_raw)
 
-    result = run_pipeline()
+    previous_runtime = os.getenv('PIPELINE_RUNTIME')
+    os.environ['PIPELINE_RUNTIME'] = _request_runtime_label()
+
+    try:
+        result = run_pipeline()
+    finally:
+        if previous_runtime is None:
+            os.environ.pop('PIPELINE_RUNTIME', None)
+        else:
+            os.environ['PIPELINE_RUNTIME'] = previous_runtime
 
     if send_email and result.get('status') in {'ok', 'error'}:
 
@@ -152,6 +176,7 @@ def config_snapshot() -> tuple[dict, int]:
         and bool(CONFIG.get('email_password')),
         'brevo_ready': bool(CONFIG.get('brevo_api_key'))
         and bool(CONFIG.get('brevo_sender_email') or CONFIG.get('email_from')),
+        'run_send_email_default': _env_bool('RUN_SEND_EMAIL_DEFAULT', 'true'),
     }, 200
 
 

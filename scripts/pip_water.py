@@ -9,6 +9,7 @@ import re
 import random
 import smtplib
 import ssl
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -63,14 +64,25 @@ def is_render() -> bool:
 
 
 def detect_runtime() -> str:
+    if runtime := os.getenv('PIPELINE_RUNTIME'):
+        return runtime.strip().lower()
+
     if is_colab():
         return 'google-colab'
     if is_render():
         return 'render'
     if os.getenv('AIRFLOW_HOME') or os.getenv('AIRFLOW_CTX_DAG_ID'):
         return 'airflow'
-    if os.getenv('FLASK_ENV') or os.getenv('WERKZEUG_RUN_MAIN'):
+
+    # Running this file directly should stay local even if Werkzeug env vars leak in the shell.
+    argv0 = Path(sys.argv[0]).name.lower() if sys.argv else ''
+    if argv0 in {'pip_water.py', 'pip_water'}:
+        return 'local'
+
+    # Fallback: developer server workers usually expose this marker.
+    if os.getenv('WERKZEUG_RUN_MAIN'):
         return 'flask'
+
     return 'local'
 
 

@@ -81,14 +81,12 @@ curl http://127.0.0.1:5000/health
 
 curl http://127.0.0.1:5000/config
 
-curl -X POST http://127.0.0.1:5000/run -H "Content-Type: application/json" -d "{}"
+run:
+curl.exe -X POST http://127.0.0.1:5000/run
 
-Invoke-RestMethod `
-  -Method POST `
-  -Uri "http://127.0.0.1:5000/run" `
-  -ContentType "application/json" `
-  -Body '{"send_email": true}'
 ```
+
+Tambem podes controlar o comportamento default com `RUN_SEND_EMAIL_DEFAULT=true|false`.
 
 ### Deploy no Render
 

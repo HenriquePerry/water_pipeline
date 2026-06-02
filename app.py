@@ -22,9 +22,7 @@ def _email_readiness() -> dict:
     recipients = [item.strip() for item in str(CONFIG.get('email_to', '')).split(',') if item.strip()]
     backend = str(CONFIG.get('email_backend', 'smtp')).strip().lower()
 
-    brevo_ready = bool(CONFIG.get('brevo_api_key')) and bool(
-        CONFIG.get('brevo_sender_email') or CONFIG.get('email_from')
-    )
+    brevo_ready = bool(CONFIG.get('brevo_api_key')) and bool(CONFIG.get('brevo_sender_email'))
 
     checks = {
         'email_enabled': bool(CONFIG.get('email_enabled')),
@@ -175,7 +173,7 @@ def config_snapshot() -> tuple[dict, int]:
         and bool(CONFIG.get('email_username'))
         and bool(CONFIG.get('email_password')),
         'brevo_ready': bool(CONFIG.get('brevo_api_key'))
-        and bool(CONFIG.get('brevo_sender_email') or CONFIG.get('email_from')),
+        and bool(CONFIG.get('brevo_sender_email')),
         'run_send_email_default': _env_bool('RUN_SEND_EMAIL_DEFAULT', 'true'),
     }, 200
 

@@ -1302,13 +1302,13 @@ def _build_profile_table_html(rows: list[tuple[str, float, float]]) -> str:
 
 def _send_email_via_brevo(subject: str, text_body: str, html_body: str, recipients: list[str]) -> dict[str, Any]:
     api_key = CONFIG.get('brevo_api_key', '').strip()
-    sender_email = (CONFIG.get('brevo_sender_email') or CONFIG.get('email_from') or '').strip()
+    sender_email = (CONFIG.get('brevo_sender_email') or '').strip()
     sender_name = (CONFIG.get('brevo_sender_name') or 'PIP Water').strip()
 
     if not api_key:
         return {'status': 'error', 'error': 'BREVO_API_KEY is missing.'}
     if not sender_email:
-        return {'status': 'error', 'error': 'BREVO_SENDER_EMAIL (or EMAIL_FROM) is missing.'}
+        return {'status': 'error', 'error': 'BREVO_SENDER_EMAIL is missing.'}
     if not recipients:
         return {'status': 'error', 'error': 'No recipients configured.'}
 

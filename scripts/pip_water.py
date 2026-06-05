@@ -210,9 +210,11 @@ CONFIG = {
         cratedb_host_value and cratedb_user_value and cratedb_password_value and cratedb_database_value and cratedb_table_value
     ),
     'anomaly_threshold_ratio': float(os.getenv('ANOMALY_THRESHOLD_RATIO', '0.8')),
+    'anomaly_upper_threshold_ratio': float(os.getenv('ANOMALY_UPPER_THRESHOLD_RATIO', '1.2')),
     'anomaly_lookback_days': int(os.getenv('ANOMALY_LOOKBACK_DAYS', '2')),
+    'anomaly_history_local_json': os.getenv('ANOMALY_HISTORY_LOCAL_JSON', '').strip(),
     'max_files': int(os.getenv('MAX_FILES', '0')),
-    'repo_sample_size': int(os.getenv('REPO_SAMPLE_SIZE', '30')),
+    'repo_sample_size': int(os.getenv('REPO_SAMPLE_SIZE', '0')),
     'skip_db_writes': _env_bool('SKIP_DB_WRITES', 'false'),
 }
 
@@ -235,7 +237,7 @@ class PipelineContext:
 
 
 # ============================================================
-# GitHub authentication and discovery
+# GitHub authentication and discovery of JSON files to process
 # ============================================================
 
 
@@ -287,11 +289,12 @@ def headers(token: str | None) -> dict[str, str]:
 TOKEN = get_github_token()
 print('GitHub token presente:', bool(TOKEN))
 
-
+#função que gera a URL raw do ficheiro JSON no GitHub para download direto pela pipeline
+# (ele gera: https://raw.githubusercontent.com/pedroccpimenta/datafiles/master/aqualog/file1.json)
 def raw_url(file_path: str, branch: str) -> str:
     return f"https://raw.githubusercontent.com/{CONFIG['repo_owner']}/{CONFIG['repo_name']}/{branch}/{file_path}"
 
-
+#lista de branch possiveis 
 def branch_candidates() -> list[str]:
     preferred = CONFIG['repo_branch'].strip()
     values = [preferred, 'main', 'master']
@@ -301,12 +304,12 @@ def branch_candidates() -> list[str]:
             unique.append(value)
     return unique
 
-
+#lê URls defenidos manualmente no config (caso queira ler fichieros JSON de URLs externas, não do GitHub)
 def list_from_json_file_urls() -> list[dict[str, str]]:
     items = [u.strip() for u in CONFIG['json_file_urls'].split(',') if u.strip()]
     return [{'name': Path(item).name, 'source': item} for item in items]
 
-
+#procura JSON de fichieros locais 
 def list_from_local_dir() -> list[dict[str, str]]:
     local_dir = CONFIG['local_json_dir'].strip()
     if not local_dir:
@@ -316,7 +319,7 @@ def list_from_local_dir() -> list[dict[str, str]]:
         return []
     return [{'name': p.name, 'source': str(p)} for p in sorted(folder.glob('*.json'))]
 
-
+#procura JSON de ficheiros listados manualmente no config (caso queira ler ficheiros JSON de um repositorio GitHub específico, mas sem usar a API, apenas construindo as URLs raw)
 def list_from_known_names() -> list[dict[str, str]]:
     names = [n.strip() for n in CONFIG['repo_json_files'].split(',') if n.strip()]
     chosen_branch = branch_candidates()[0]
@@ -324,7 +327,7 @@ def list_from_known_names() -> list[dict[str, str]]:
         {'name': Path(name).name, 'source': raw_url(f"{CONFIG['repo_folder']}/{name}", chosen_branch)} for name in names
     ]
 
-
+#liga á GIThub API , lista ficheiros, encontra .json gera links de URLs, e retorna uma lista de dicionarios com nome e URL de cada ficheiro JSON encontrado
 def list_from_github(token: str | None) -> list[dict[str, str]]:
     last_error: str | None = None
 
@@ -365,7 +368,7 @@ def list_from_github(token: str | None) -> list[dict[str, str]]:
         )
     return []
 
-
+#funcao que define a origem dos ficheiros JSON a processar pela pipeline 
 def extract_date_from_name(file_name: str):
     match = re.search(r'(20\d{6})', file_name)
     if not match:
@@ -836,6 +839,31 @@ def _coerce_payload_dict(payload: Any) -> dict[str, Any]:
     return {}
 
 
+def _parse_numeric_liters(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    text = text.replace('\u00a0', '').replace(' ', '')
+    if ',' in text and '.' not in text:
+        text = text.replace(',', '.')
+    elif ',' in text and '.' in text:
+        text = text.replace(',', '')
+
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+#transforma JSOSN em formato tabular, extrai contador, alias, device, timestamp e valor em litros, normaliza e retorna como lista de dicionarios
 def _flatten_meter_payload(record: dict[str, Any], source_tag: str = '') -> list[dict[str, Any]]:
     header = record.get('header')
     body = record.get('body')
@@ -853,11 +881,28 @@ def _flatten_meter_payload(record: dict[str, Any], source_tag: str = '') -> list
             or mapped.get('device')
             or mapped.get('Contador')
             or mapped.get('contador')
+            or mapped.get('Detalhes')
+            or mapped.get('detalhes')
             or ''
         ).strip()
-        alias = str(mapped.get('Alias') or mapped.get('alias') or '').strip()
-        timestamp_raw = mapped.get('Date/Time') or mapped.get('timestamp') or mapped.get('Timestamp') or mapped.get('datahora')
+        alias = str(mapped.get('Alias') or mapped.get('alias') or mapped.get('Nome') or mapped.get('nome') or '').strip()
+        timestamp_raw = (
+            mapped.get('Date/Time')
+            or mapped.get('timestamp')
+            or mapped.get('Timestamp')
+            or mapped.get('datahora')
+            or mapped.get('Data e hora')
+            or mapped.get('data e hora')
+        )
         timestamp = pd.to_datetime(timestamp_raw, dayfirst=True, errors='coerce')
+        value_l = _parse_numeric_liters(
+            mapped.get('Valor (l)')
+            or mapped.get('valor_l')
+            or mapped.get('value_l')
+            or mapped.get('Value (l)')
+            or mapped.get('Value')
+            or mapped.get('value')
+        )
         contador = device or alias
         if not contador:
             continue
@@ -867,6 +912,7 @@ def _flatten_meter_payload(record: dict[str, Any], source_tag: str = '') -> list
                 'device': device,
                 'alias': alias,
                 'timestamp': timestamp,
+                'value_l': value_l,
                 'source_file': record.get('_source_file', source_tag or ''),
                 '_run_id': record.get('_run_id'),
             }
@@ -876,14 +922,14 @@ def _flatten_meter_payload(record: dict[str, Any], source_tag: str = '') -> list
 
 def _flatten_meter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'source_file', '_run_id'])
+        return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'value_l', 'source_file', '_run_id'])
 
     flattened: list[dict[str, Any]] = []
     for record in df.to_dict(orient='records'):
         flattened.extend(_flatten_meter_payload(record))
 
     if not flattened:
-        return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'source_file', '_run_id'])
+        return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'value_l', 'source_file', '_run_id'])
 
     flat_df = pd.DataFrame(flattened)
     flat_df['timestamp'] = pd.to_datetime(flat_df['timestamp'], errors='coerce')
@@ -891,20 +937,45 @@ def _flatten_meter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _load_tidb_history_for_anomalies(lookback_days: int) -> pd.DataFrame:
+
+    local_history_source = str(CONFIG.get('anomaly_history_local_json', '') or '').strip()
+    if local_history_source:
+        local_path = Path(local_history_source)
+        if not local_path.exists():
+            return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'value_l', 'source_file', '_run_id'])
+
+        try:
+            payload = json.loads(local_path.read_text(encoding='utf-8'))
+        except Exception:
+            return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'value_l', 'source_file', '_run_id'])
+
+        records = payload if isinstance(payload, list) else [payload]
+        rows: list[dict[str, Any]] = []
+        for record in records:
+            if isinstance(record, dict):
+                rows.extend(_flatten_meter_payload(record, source_tag=local_path.name))
+
+        if not rows:
+            return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'value_l', 'source_file', '_run_id'])
+
+        history_df = pd.DataFrame(rows)
+        history_df['timestamp'] = pd.to_datetime(history_df['timestamp'], errors='coerce')
+        return history_df
+
     if not CONFIG['tidb_enabled'] or pymysql is None:
-        return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'source_file', '_run_id'])
+        return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'value_l', 'source_file', '_run_id'])
 
     required = ['tidb_host', 'tidb_user', 'tidb_password', 'tidb_database', 'tidb_table']
     missing = [name for name in required if not CONFIG.get(name)]
     if missing:
-        return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'source_file', '_run_id'])
+        return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'value_l', 'source_file', '_run_id'])
 
     ca_path = (CONFIG.get('tidb_ca_path') or '').strip()
     if ca_path and not os.path.exists(ca_path):
         if is_colab() and certifi is not None:
             ca_path = certifi.where()
         else:
-            return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'source_file', '_run_id'])
+            return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'value_l', 'source_file', '_run_id'])
     if not ca_path and 'tidbcloud' in str(CONFIG.get('tidb_host', '')).lower() and certifi is not None:
         ca_path = certifi.where()
 
@@ -927,7 +998,7 @@ def _load_tidb_history_for_anomalies(lookback_days: int) -> pd.DataFrame:
         )
         connection.select_db(CONFIG['tidb_database'])
     except Exception:
-        return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'source_file', '_run_id'])
+        return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'value_l', 'source_file', '_run_id'])
 
     try:
         with connection.cursor() as cursor:
@@ -949,12 +1020,12 @@ def _load_tidb_history_for_anomalies(lookback_days: int) -> pd.DataFrame:
                 payload['_source_file'] = source_file or payload.get('_source_file', '')
                 rows.extend(_flatten_meter_payload(payload, source_tag=str(source_file or '')))
     except Exception:
-        return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'source_file', '_run_id'])
+        return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'value_l', 'source_file', '_run_id'])
     finally:
         connection.close()
 
     if not rows:
-        return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'source_file', '_run_id'])
+        return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'value_l', 'source_file', '_run_id'])
 
     history_df = pd.DataFrame(rows)
     history_df['timestamp'] = pd.to_datetime(history_df['timestamp'], errors='coerce')
@@ -963,6 +1034,8 @@ def _load_tidb_history_for_anomalies(lookback_days: int) -> pd.DataFrame:
 
 def build_meter_anomaly_report(current_df: pd.DataFrame, run_id: str, lookback_days: int = 2) -> dict[str, Any]:
     threshold_ratio = float(CONFIG.get('anomaly_threshold_ratio', 0.8) or 0.8)
+    upper_threshold_ratio = float(CONFIG.get('anomaly_upper_threshold_ratio', 1.2) or 1.2)
+    history_load_seconds = 0.0
     current_flat = _flatten_meter_dataframe(current_df)
 
     if current_flat.empty:
@@ -971,6 +1044,7 @@ def build_meter_anomaly_report(current_df: pd.DataFrame, run_id: str, lookback_d
             'reason': 'No meter readings found in the current batch.',
             'lookback_days': lookback_days,
             'threshold_ratio': threshold_ratio,
+            'upper_threshold_ratio': upper_threshold_ratio,
             'run_id': run_id,
         }
 
@@ -981,22 +1055,72 @@ def build_meter_anomaly_report(current_df: pd.DataFrame, run_id: str, lookback_d
             'reason': 'Current batch has no parseable timestamps.',
             'lookback_days': lookback_days,
             'threshold_ratio': threshold_ratio,
+            'upper_threshold_ratio': upper_threshold_ratio,
+            'run_id': run_id,
+        }
+
+    current_flat['day'] = current_flat['timestamp'].dt.floor('D')
+    day_stats = (
+        current_flat.groupby('day', as_index=False)
+        .agg(
+            readings=('contador', 'size'),
+            counters=('contador', 'nunique'),
+        )
+        .sort_values('day')
+        .reset_index(drop=True)
+    )
+    day_stats['avg_per_counter'] = day_stats['readings'] / day_stats['counters'].replace(0, pd.NA)
+
+    current_day = day_stats['day'].iloc[-1]
+    current_day_partial = False
+    current_day_selected_from = str(current_day.date())
+
+    if len(day_stats) >= 2:
+        prev_stats = day_stats.iloc[:-1].tail(min(max(lookback_days, 2), 5)).copy()
+        baseline_avg = float(prev_stats['avg_per_counter'].median() or 0.0)
+        latest_avg = float(day_stats['avg_per_counter'].iloc[-1] or 0.0)
+
+        # If the latest day has much fewer readings per counter than recent days, treat it as partial.
+        if baseline_avg > 0 and latest_avg < baseline_avg * 0.5:
+            valid_prev = day_stats.iloc[:-1].loc[day_stats.iloc[:-1]['avg_per_counter'] >= baseline_avg * 0.5]
+            if not valid_prev.empty:
+                current_day = valid_prev['day'].iloc[-1]
+                current_day_partial = True
+                current_day_selected_from = str(day_stats['day'].iloc[-1].date())
+
+    current_day_flat = current_flat.loc[current_flat['day'] == current_day].copy()
+    if current_day_flat.empty:
+        return {
+            'status': 'skipped',
+            'reason': 'Current batch has no rows for the latest day.',
+            'lookback_days': lookback_days,
+            'threshold_ratio': threshold_ratio,
             'run_id': run_id,
         }
 
     current_counts = (
-        current_flat.groupby('contador', as_index=False)
-        .agg(device=('device', 'first'), alias=('alias', 'first'), current_count=('contador', 'size'))
+        current_day_flat.groupby('contador', as_index=False)
+        .agg(
+            device=('device', 'first'),
+            alias=('alias', 'first'),
+            current_count=('contador', 'size'),
+            current_water_sum_l=('value_l', 'sum'),
+        )
         .copy()
     )
+    current_counts['current_water_sum_l'] = pd.to_numeric(current_counts['current_water_sum_l'], errors='coerce').fillna(0.0)
 
+    history_load_started = time.perf_counter()
     history_flat = _load_tidb_history_for_anomalies(lookback_days)
+    history_load_seconds = round(time.perf_counter() - history_load_started, 4)
     if history_flat.empty:
         return {
             'status': 'skipped',
-            'reason': f'No TiDB history found for the last {lookback_days} days.',
+            'reason': f'No TiDB history found for the last {lookback_days} day(s).',
             'lookback_days': lookback_days,
+            'history_load_seconds': history_load_seconds,
             'threshold_ratio': threshold_ratio,
+            'upper_threshold_ratio': upper_threshold_ratio,
             'run_id': run_id,
             'current_readings': int(len(current_flat)),
             'current_counters': int(len(current_counts)),
@@ -1008,46 +1132,112 @@ def build_meter_anomaly_report(current_df: pd.DataFrame, run_id: str, lookback_d
             'status': 'skipped',
             'reason': 'Historical TiDB rows have no parseable timestamps.',
             'lookback_days': lookback_days,
+            'history_load_seconds': history_load_seconds,
             'threshold_ratio': threshold_ratio,
+            'upper_threshold_ratio': upper_threshold_ratio,
             'run_id': run_id,
             'current_readings': int(len(current_flat)),
             'current_counters': int(len(current_counts)),
         }
 
     history_flat['day'] = history_flat['timestamp'].dt.floor('D')
-    history_daily = history_flat.groupby(['contador', 'day'], as_index=False).size().rename(columns={'size': 'history_count'})
+    history_start_day = current_day - pd.Timedelta(days=lookback_days)
+    history_window = history_flat.loc[
+        (history_flat['day'] >= history_start_day) & (history_flat['day'] < current_day)
+    ].copy()
+    if history_window.empty:
+        return {
+            'status': 'skipped',
+            'reason': f'No historical rows available in the {lookback_days} day window before {current_day.date()}.',
+            'lookback_days': lookback_days,
+            'history_load_seconds': history_load_seconds,
+            'threshold_ratio': threshold_ratio,
+            'upper_threshold_ratio': upper_threshold_ratio,
+            'run_id': run_id,
+            'current_day': str(current_day.date()),
+            'current_readings': int(len(current_day_flat)),
+            'current_counters': int(len(current_counts)),
+        }
+
+    history_window['value_l'] = pd.to_numeric(history_window['value_l'], errors='coerce').fillna(0.0)
+    history_daily = (
+        history_window.groupby(['contador', 'day'], as_index=False)
+        .agg(history_count=('contador', 'size'), history_water_l=('value_l', 'sum'))
+    )
+    history_daily_recent = (
+        history_daily.sort_values(['contador', 'day'], ascending=[True, False])
+        .groupby('contador', as_index=False)
+        .head(lookback_days)
+        .copy()
+    )
+    compared_history_days = sorted(
+        {str(day.date()) for day in history_daily_recent['day'].dropna().unique()},
+        reverse=True,
+    )
     history_stats = (
-        history_daily.groupby('contador', as_index=False)
+        history_daily_recent.groupby('contador', as_index=False)
         .agg(
             history_avg=('history_count', 'mean'),
             history_median=('history_count', 'median'),
             history_min=('history_count', 'min'),
             history_max=('history_count', 'max'),
             history_days=('day', 'nunique'),
+            history_avg_water_l=('history_water_l', 'mean'),
         )
         .copy()
     )
 
-    comparison = history_stats.merge(current_counts, on='contador', how='left')
+    comparison = current_counts.merge(history_stats, on='contador', how='left')
+    comparison['has_history'] = comparison['history_avg'].notna()
     comparison['current_count'] = comparison['current_count'].fillna(0).astype(int)
+    comparison['current_water_sum_l'] = comparison['current_water_sum_l'].fillna(0.0)
     comparison['expected_count'] = comparison['history_avg'].fillna(0.0)
-    comparison['ratio'] = comparison.apply(
-        lambda row: round(row['current_count'] / row['expected_count'], 3) if row['expected_count'] else None,
-        axis=1,
+    comparison['expected_water_l'] = comparison['history_avg_water_l'].fillna(0.0)
+    comparison['count_ratio'] = (comparison['current_count'] / comparison['expected_count']).where(comparison['expected_count'] > 0)
+    comparison['is_low_anomaly'] = (
+        comparison['has_history']
+        & comparison['expected_count'].gt(0)
+        & comparison['current_count'].lt(comparison['expected_count'] * threshold_ratio)
     )
-    comparison['is_anomaly'] = comparison['expected_count'].gt(0) & comparison['current_count'].lt(
-        comparison['expected_count'] * threshold_ratio
+    comparison['is_high_anomaly'] = (
+        comparison['has_history']
+        & comparison['expected_count'].gt(0)
+        & comparison['current_count'].gt(comparison['expected_count'] * upper_threshold_ratio)
     )
+    comparison['is_anomaly'] = comparison['is_low_anomaly'] | comparison['is_high_anomaly']
+
+    missing_history = comparison.loc[~comparison['has_history']].copy()
+    missing_history = missing_history.sort_values(['contador'], ascending=[True])
+    missing_history_details = [
+        {
+            'contador': row.get('contador', ''),
+            'device': row.get('device', ''),
+            'alias': row.get('alias', ''),
+            'current_count': int(row.get('current_count') or 0),
+            'history_missing': True,
+            'flag': 'no_history_in_tidb',
+        }
+        for row in missing_history.to_dict(orient='records')
+    ]
 
     flagged = comparison.loc[comparison['is_anomaly']].copy()
-    flagged = flagged.sort_values(['ratio', 'current_count', 'contador'], ascending=[True, True, True])
+    flagged['anomaly_direction'] = flagged.apply(
+        lambda row: 'above_expected' if bool(row.get('is_high_anomaly')) else 'below_expected',
+        axis=1,
+    )
+    flagged['abs_delta_count'] = (flagged['current_count'] - flagged['expected_count']).abs()
+    flagged = flagged.sort_values(['abs_delta_count', 'contador'], ascending=[False, True])
 
     details: list[dict[str, Any]] = []
     for row in flagged.to_dict(orient='records'):
         expected_count = round(float(row.get('expected_count') or 0.0), 2)
         current_count = int(row.get('current_count') or 0)
-        missing_count = max(0, int(round(expected_count - current_count)))
-        lost_percentage = round((missing_count / expected_count) * 100, 1) if expected_count else 0.0
+        delta_count = round(current_count - expected_count, 2)
+        missing_count = round(max(0.0, expected_count - current_count), 2)
+        excess_count = round(max(0.0, current_count - expected_count), 2)
+        delta_percentage = round((abs(delta_count) / expected_count) * 100, 1) if expected_count else 0.0
+        is_high = bool(row.get('is_high_anomaly'))
+        anomaly_direction = 'above_expected' if is_high else 'below_expected'
         details.append(
             {
                 'contador': row.get('contador', ''),
@@ -1055,17 +1245,24 @@ def build_meter_anomaly_report(current_df: pd.DataFrame, run_id: str, lookback_d
                 'alias': row.get('alias', ''),
                 'current_count': current_count,
                 'expected_count': expected_count,
+                'delta_count': delta_count,
+                'delta_percentage': delta_percentage,
+                'anomaly_direction': anomaly_direction,
                 'missing_count': missing_count,
-                'lost_percentage': lost_percentage,
+                'excess_count': excess_count,
+                'lost_percentage': round((missing_count / expected_count) * 100, 1) if expected_count else 0.0,
+                'excess_percentage': round((excess_count / expected_count) * 100, 1) if expected_count else 0.0,
                 'expected_total_count': expected_count,
                 'missing_total_count': missing_count,
-                'lost_total_percentage': lost_percentage,
+                'lost_total_percentage': round((missing_count / expected_count) * 100, 1) if expected_count else 0.0,
+                'excess_total_count': excess_count,
+                'excess_total_percentage': round((excess_count / expected_count) * 100, 1) if expected_count else 0.0,
                 'history_avg': round(float(row.get('history_avg') or 0.0), 2),
                 'history_median': round(float(row.get('history_median') or 0.0), 2),
                 'history_min': int(row.get('history_min') or 0),
                 'history_max': int(row.get('history_max') or 0),
                 'history_days': int(row.get('history_days') or 0),
-                'ratio': row.get('ratio'),
+                'history_missing': False,
                 'missing_readings': missing_count,
             }
         )
@@ -1077,20 +1274,31 @@ def build_meter_anomaly_report(current_df: pd.DataFrame, run_id: str, lookback_d
         'source': 'tidb',
         'run_id': run_id,
         'lookback_days': lookback_days,
+        'current_day': str(current_day.date()),
+        'current_day_selected_from': current_day_selected_from,
+        'current_day_partial': current_day_partial,
+        'compared_history_days': compared_history_days,
+        'history_load_seconds': history_load_seconds,
+        'comparison_basis': f'current day vs average of previous {lookback_days} day(s)',
         'threshold_ratio': threshold_ratio,
-        'current_readings': int(len(current_flat)),
+        'upper_threshold_ratio': upper_threshold_ratio,
+        'current_readings': int(len(current_day_flat)),
         'current_counters': int(len(current_counts)),
-        'history_readings': int(len(history_flat)),
+        'history_readings': int(len(history_window)),
         'history_counters': int(len(history_stats)),
         'expected_readings_total': round(total_expected, 2),
         'current_readings_total': total_current,
+        'below_threshold_counters': int(comparison['is_low_anomaly'].sum()),
+        'above_threshold_counters': int(comparison['is_high_anomaly'].sum()),
         'anomalous_counters': int(len(details)),
+        'counters_without_history': int(len(missing_history_details)),
+        'without_history_details': missing_history_details,
         'details': details,
     }
 
-
+#função que define de onde vem os ficheiros JSON que a pipeline vai processar
 def list_candidate_files() -> tuple[list[dict[str, str]], str]:
-    files = list_from_json_file_urls()
+    files = list_from_json_file_urls() #ficheiros
     mode = 'JSON_FILE_URLS'
     if not files:
         files = list_from_local_dir()
@@ -1099,21 +1307,60 @@ def list_candidate_files() -> tuple[list[dict[str, str]], str]:
         files = list_from_known_names()
         mode = 'REPO_JSON_FILES'
     if not files:
-        files = list_from_github(TOKEN)
+        files = list_from_github(TOKEN) #a que esta a ser usada atualmente, pesquisa no github os ficheiros JSON
         mode = 'GITHUB_API'
     files = apply_date_window(files)
     if mode in {'REPO_JSON_FILES', 'GITHUB_API'}:
         files = limit_repo_files_randomly(files)
     return files, mode
 
-
+#tabela das anomalias 
 def _build_anomaly_table_html(anomaly_report: dict[str, Any] | None) -> str:
     if not anomaly_report:
         return ''
 
     status = anomaly_report.get('status', 'skipped')
     anomalous_count = int(anomaly_report.get('anomalous_counters', 0) or 0)
-    if status != 'ok' or anomalous_count == 0:
+    missing_history_count = int(anomaly_report.get('counters_without_history', 0) or 0)
+    current_day = str(anomaly_report.get('current_day') or '')
+    compared_days = anomaly_report.get('compared_history_days', []) or []
+    compared_days_text = ', '.join(str(day) for day in compared_days)
+    comparison_days_html = (
+        "<p style='margin:6px 0;color:#555'>"
+        f"Dia analisado (ficheiro): <b>{ihtml.escape(current_day)}</b><br>"
+        f"Dias comparados da BD: <b>{ihtml.escape(compared_days_text or '-')}</b>"
+        "</p>"
+    )
+    if status != 'ok':
+        reason = str(anomaly_report.get('reason') or 'anomaly report unavailable')
+        return (
+            "<p style='margin:12px 0 6px;color:#8a6d3b;font-weight:bold'>"
+            f"Analise de anomalias indisponivel: {ihtml.escape(reason)}"
+            "</p>"
+        )
+
+    if anomalous_count == 0 and missing_history_count == 0:
+        lookback_days = int(anomaly_report.get('lookback_days', 2) or 2)
+        current_day = str(anomaly_report.get('current_day') or '')
+        day_text = f" no dia {ihtml.escape(current_day)}" if current_day else ''
+        return (
+            "<p style='margin:12px 0 6px;color:#2e7d32;font-weight:bold'>"
+            f"Sem anomalias detetadas{day_text} (janela de {lookback_days} dia(s))."
+            "</p>"
+        ) + comparison_days_html
+
+    if anomalous_count == 0 and missing_history_count > 0:
+        details = anomaly_report.get('without_history_details', []) or []
+        preview = ', '.join(str(item.get('contador', '')) for item in details[:10] if item.get('contador'))
+        suffix = '...' if missing_history_count > 10 else ''
+        return (
+            "<p style='margin:12px 0 6px;color:#8a6d3b;font-weight:bold'>"
+            f"Sem anomalias de contagem, mas {missing_history_count} contador(es) sem historico na TiDB"
+            f" ({preview}{suffix})."
+            "</p>"
+        ) + comparison_days_html
+
+    if anomalous_count <= 0:
         return ''
 
     details = anomaly_report.get('details', []) or []
@@ -1121,51 +1368,71 @@ def _build_anomaly_table_html(anomaly_report: dict[str, Any] | None) -> str:
         return ''
 
     top_details = details[:10]
+    lookback_days = int(anomaly_report.get('lookback_days', 2) or 2)
+    below_count = int(anomaly_report.get('below_threshold_counters', 0) or 0)
+    above_count = int(anomaly_report.get('above_threshold_counters', 0) or 0)
     table_rows: list[str] = []
     for item in top_details:
         contador = str(item.get('contador', ''))
         expected = float(item.get('expected_total_count', item.get('expected_count', 0)) or 0)
         current = int(item.get('current_count', 0) or 0)
-        ratio = item.get('ratio')
-        ratio_str = f"{float(ratio) * 100:.1f}%" if ratio is not None else '-'
-        missing = int(item.get('missing_total_count', item.get('missing_readings', max(0, round(expected - current)))) or 0)
-        lost_percentage = float(item.get('lost_total_percentage', item.get('lost_percentage', (missing / expected * 100) if expected else 0.0)) or 0.0)
+        direction = str(item.get('anomaly_direction', 'below_expected'))
+        delta_count = float(item.get('delta_count', round(current - expected, 2)) or 0.0)
+        delta_pct = float(item.get('delta_percentage', (abs(delta_count) / expected * 100) if expected else 0.0) or 0.0)
+        type_label = 'Acima do esperado' if direction == 'above_expected' else 'Abaixo do esperado'
+        delta_color = '#f0ad4e' if direction == 'above_expected' else '#d9534f'
+        delta_prefix = '+' if delta_count > 0 else ''
 
         table_rows.append(
             "<tr>"
             f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:left'>{contador}</td>"
             f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right'>{expected:.2f}</td>"
             f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right'>{current}</td>"
-            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right;color:#b00020'>{ratio_str}</td>"
-            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right;color:#b00020'>{lost_percentage:.1f}%</td>"
-            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right;color:#d9534f'>-{missing}</td>"
+            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right;color:{delta_color}'>{delta_prefix}{delta_count:.2f}</td>"
+            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right;color:{delta_color}'>{delta_pct:.1f}%</td>"
+            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:left;color:{delta_color}'>{type_label}</td>"
             "</tr>"
         )
 
     head = (
         "<tr>"
         "<th style='border:1px solid #ccc;padding:4px 6px;text-align:left;background:#f9f9f9;color:#d9534f'>Contador</th>"
-        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Contagem esperada</th>"
-        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Atual</th>"
-        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Racio %</th>"
-        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Percentagem perdida</th>"
-        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Soma em falta</th>"
+        f"<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Contagem esperada (media {lookback_days}d)</th>"
+        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Contagem atual</th>"
+        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Diferenca</th>"
+        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Variacao (%)</th>"
+        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:left;background:#f9f9f9;color:#d9534f'>Tipo</th>"
         "</tr>"
     )
 
-    table_html = (
-        "<table style='border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#222;margin-top:12px'>"
-        + head
-        + ''.join(table_rows)
-        + "</table>"
-    )
+    content = ''
+    if anomalous_count > 0 and table_rows:
+        table_html = (
+            "<table style='border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#222;margin-top:12px'>"
+            + head
+            + ''.join(table_rows)
+            + "</table>"
+        )
+        intro = (
+            "<p style='margin:12px 0 6px;color:#d9534f;font-weight:bold'>"
+            f"{anomalous_count} contador(es) fora da media dos {lookback_days} dias anteriores "
+            f"(abaixo: {below_count}, acima: {above_count}):"
+            "</p>"
+        )
+        content += intro + comparison_days_html + table_html
 
-    intro = (
-        "<p style='margin:12px 0 6px;color:#d9534f;font-weight:bold'>"
-        f"{anomalous_count} contador(es) com menos leituras do que o esperado (ultimos 2 dias):"
-        "</p>"
-    )
-    return intro + table_html
+    if missing_history_count > 0:
+        missing_items = anomaly_report.get('without_history_details', []) or []
+        preview = ', '.join(str(item.get('contador', '')) for item in missing_items[:10] if item.get('contador'))
+        suffix = '...' if missing_history_count > 10 else ''
+        content += (
+            "<p style='margin:10px 0 0;color:#8a6d3b;font-weight:bold'>"
+            f"{missing_history_count} contador(es) sem historico na TiDB"
+            f" ({preview}{suffix})."
+            "</p>"
+        )
+
+    return content
 
 
 def _safe_float(value: Any) -> float:
@@ -1264,6 +1531,17 @@ def _build_profile_rows_from_result(result: dict[str, Any]) -> list[tuple[str, f
                             round(cumulative, 2),
                         )
                     )
+
+    anomalies = result.get('anomalies') or {}
+    history_load_seconds = _safe_float(anomalies.get('history_load_seconds', 0.0))
+    if history_load_seconds > 0:
+        rows.append(
+            (
+                f"... [anomaly] TiDB history read: {history_load_seconds:.2f}s",
+                round(cumulative, 2),
+                round(cumulative, 2),
+            )
+        )
 
     overall = round(cumulative, 2)
     rows.append(('Overall pipeline', overall, overall))
@@ -1374,22 +1652,24 @@ def _send_email_via_smtp(subject: str, text_body: str, html_body: str, recipient
 # ============================================================
 
 
-def send_email_summary(result: dict[str, Any]) -> None:
+def send_email_summary(result: dict[str, Any]) -> dict[str, Any]:
     if not CONFIG['email_enabled']:
-        return
+        return {'status': 'skipped', 'reason': 'EMAIL_ENABLED is false'}
 
     recipients = [item.strip() for item in CONFIG['email_to'].split(',') if item.strip()]
     if not recipients:
-        return
+        return {'status': 'skipped', 'reason': 'EMAIL_TO has no recipients'}
     if not CONFIG['email_from'] or not CONFIG['email_username'] or not CONFIG['email_password']:
         if CONFIG.get('email_backend') != 'brevo' or not CONFIG.get('brevo_api_key'):
-            return
+            return {'status': 'skipped', 'reason': 'email credentials are incomplete'}
 
     status = result.get('status', 'unknown')
     runtime_label = str(result.get('runtime') or detect_runtime() or 'unknown').strip().lower()
     subject = f"[PIP Water | {runtime_label}] {status.upper()} | {result.get('run_id', 'N/A')}"
     anomalies = result.get('anomalies', {}) or {}
     anom_count = int(anomalies.get('anomalous_counters', 0) or 0)
+    anom_below_count = int(anomalies.get('below_threshold_counters', 0) or 0)
+    anom_above_count = int(anomalies.get('above_threshold_counters', 0) or 0)
     profile_rows = _build_profile_rows_from_result(result)
     profile_table_html = _build_profile_table_html(profile_rows)
     anomaly_table_html = _build_anomaly_table_html(anomalies)
@@ -1403,7 +1683,10 @@ def send_email_summary(result: dict[str, Any]) -> None:
     text_lines.extend(f"{task} | watch: {w:.2f} | proc: {p:.2f}" for task, w, p in profile_rows)
 
     if anom_count > 0:
-        text_lines.append(f"\n[ANOMALIAS] {anom_count} contador(es) com problema nos ultimos 2 dias")
+        text_lines.append(
+            f"\n[ANOMALIAS] {anom_count} contador(es) fora do esperado nos ultimos 2 dias "
+            f"(abaixo: {anom_below_count}, acima: {anom_above_count})"
+        )
 
     error_text = result.get('error')
     if error_text:
@@ -1433,11 +1716,12 @@ def send_email_summary(result: dict[str, Any]) -> None:
             raise RuntimeError(send_result.get('error', 'Brevo email send failed.'))
         if send_result.get('status') != 'ok':
             raise RuntimeError(send_result.get('error', 'Email send failed.'))
-        return
+        return send_result
 
     send_result = _send_email_via_smtp(subject, text_body, html_body, recipients)
     if send_result.get('status') != 'ok':
         raise RuntimeError(send_result.get('error', 'SMTP email send failed.'))
+    return send_result
 
 
 # ============================================================
@@ -1585,6 +1869,7 @@ if __name__ == '__main__':
     result = run_pipeline()
     print(json.dumps(result, indent=2, ensure_ascii=False))
     try:
-        send_email_summary(result)
+        email_dispatch = send_email_summary(result)
+        print('Email dispatch:', json.dumps(email_dispatch, ensure_ascii=False))
     except Exception as exc:
         print('Falha no envio de email:', exc)

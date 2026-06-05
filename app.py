@@ -124,10 +124,13 @@ def run_once() -> tuple[dict, int]:
         else:
 
             try:
-                send_email_summary(result)
+                send_result = send_email_summary(result)
 
                 result['email_dispatch'] = {
-                    'status': 'attempted',
+                    'status': str(send_result.get('status', 'attempted')),
+                    'provider': send_result.get('provider'),
+                    'reason': send_result.get('reason'),
+                    'error': send_result.get('error'),
                     'checks': readiness,
                 }
 

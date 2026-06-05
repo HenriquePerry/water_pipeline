@@ -9,3 +9,9 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.14.4
+      - key: EMAIL_ENABLED
+        value: true
+      - key: EMAIL_BACKEND
+        value: brevo
+      - key: RUN_SEND_EMAIL_DEFAULT
+        value: true

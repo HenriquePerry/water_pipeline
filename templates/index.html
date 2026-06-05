@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Water Pipeline</title>
+  <style>
+    :root {
+      --bg: #f5f4ef;
+      --panel: #ffffff;
+      --panel-soft: #faf9f6;
+      --text: #1d1a16;
+      --muted: #817b72;
+      --line: #e8e2d8;
+      --line-strong: #d8d0c3;
+      --accent: #01696f;
+      --accent-dark: #0c4e54;
+      --accent-soft: rgba(1, 105, 111, 0.1);
+      --ok: #2f7a1f;
+      --warn: #9a5b1c;
+      --err: #a12c2c;
+      --chip: #f1eee7;
+      --shadow: 0 10px 30px rgba(34, 28, 20, 0.07);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: Inter, "Segoe UI", system-ui, -apple-system, sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(1, 105, 111, 0.08), transparent 30%),
+        radial-gradient(circle at bottom right, rgba(154, 91, 28, 0.08), transparent 32%),
+        var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 44px 20px 56px;
+    }
+
+    .shell {
+      max-width: 760px;
+      margin: 0 auto;
+    }
+
+    .header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+
+    .title-wrap h1 {
+      margin: 0;
+      font-size: 1.45rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .title-wrap .sub {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      justify-content: flex-end;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: var(--chip);
+      border: 1px solid rgba(0, 0, 0, 0.04);
+      color: #4c463f;
+      font-size: 0.82rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .chip .dot-mini {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+
+    .chip.ok .dot-mini { background: var(--ok); }
+    .chip.warn .dot-mini { background: var(--warn); }
+    .chip.err .dot-mini { background: var(--err); }
+    .chip.accent .dot-mini { background: var(--accent); }
+
+    .source-row {
+      display: flex;
+      justify-content: flex-end;
+      margin: 22px 0 18px;
+    }
+
+    .source-select-wrap {
+      position: relative;
+      min-width: 260px;
+    }
+
+    .source-select-wrap select {
+      width: 100%;
+      appearance: none;
+      -webkit-appearance: none;
+      border: 1px solid var(--line-strong);
+      border-radius: 11px;
+      background: #fff;
+      color: #36322d;
+      padding: 0.78rem 2.7rem 0.78rem 1rem;
+      font-size: 0.94rem;
+      font-weight: 600;
+      box-shadow: var(--shadow);
+      cursor: pointer;
+      transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+    }
+
+    .source-select-wrap select:hover {
+      transform: translateY(-1px);
+      border-color: #b9b1a6;
+    }
+
+    .source-select-wrap select:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow);
+    }
+
+    .source-select-wrap::after {
+      content: '';
+      position: absolute;
+      right: 1rem;
+      top: 50%;
+      transform: translateY(-30%);
+      border-left: 5px solid transparent;
+      border-right: 5px solid transparent;
+      border-top: 6px solid #8e8a83;
+      pointer-events: none;
+    }
+
+    .grid {
+      display: grid;
+      gap: 18px;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.88);
+      backdrop-filter: blur(6px);
+      border: 1px solid rgba(0, 0, 0, 0.06);
+      border-radius: 18px;
+      padding: 18px 20px;
+      box-shadow: var(--shadow);
+    }
+
+    .card-title {
+      font-size: 0.73rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.11em;
+      color: #b0a79a;
+      margin-bottom: 14px;
+    }
+
+    #fileList {
+      max-height: 240px;
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+
+    .file-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 4px;
+      border-bottom: 1px solid #f0ece4;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 0.9rem;
+      color: #514b42;
+    }
+
+    .file-row:last-child { border-bottom: none; }
+    .fdot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      opacity: 0.55;
+      flex-shrink: 0;
+    }
+    .fmsg {
+      color: #b5afa5;
+      font-style: italic;
+      font-size: 0.9rem;
+    }
+
+    .fields {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 18px;
+      align-items: flex-end;
+      margin-bottom: 14px;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    label {
+      font-size: 0.82rem;
+      color: #776f64;
+      font-weight: 600;
+    }
+
+    input[type="date"], input[type="number"] {
+      background: var(--panel-soft);
+      border: 1px solid #ded7cb;
+      border-radius: 9px;
+      padding: 0.64rem 0.8rem;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 0.94rem;
+      color: var(--text);
+    }
+
+    input[type="date"] { width: 180px; }
+    input[type="number"] { width: 110px; }
+    input[type="checkbox"] { transform: translateY(1px); }
+
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+      background: #fff;
+    }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 4px 0 16px;
+      color: #675f55;
+      font-size: 0.9rem;
+    }
+
+    .btn-run {
+      background: linear-gradient(180deg, #02727a, #015d63);
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      padding: 0.72rem 1.35rem;
+      font-size: 0.92rem;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 8px 16px rgba(1, 105, 111, 0.18);
+      transition: transform 0.15s, box-shadow 0.15s, opacity 0.15s;
+    }
+
+    .btn-run:hover { transform: translateY(-1px); box-shadow: 0 12px 20px rgba(1, 105, 111, 0.22); }
+    .btn-run:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+      font-size: 0.84rem;
+      color: #897f72;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #d3ccc3;
+      flex-shrink: 0;
+    }
+
+    .dot.running { background: #a8692a; animation: pulse 1s infinite; }
+    .dot.done { background: var(--ok); }
+    .dot.error { background: var(--err); }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+    #log {
+      background: #f9f7f2;
+      border: 1px solid #e3ddd1;
+      border-radius: 12px;
+      padding: 14px 16px;
+      min-height: 270px;
+      max-height: 520px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 0.85rem;
+      line-height: 1.8;
+      color: #1c1a16;
+    }
+
+    .ok { color: var(--ok); }
+    .err { color: var(--err); }
+    .dim { color: #c1bbb1; }
+    .warn { color: var(--warn); }
+
+    .footer-note {
+      margin-top: 12px;
+      color: #91897d;
+      font-size: 0.82rem;
+    }
+
+    @media (max-width: 640px) {
+      body { padding: 26px 14px 40px; }
+      .header { align-items: flex-start; }
+      .source-row { justify-content: stretch; }
+      .source-select-wrap { min-width: 0; width: 100%; }
+      input[type="date"], input[type="number"] { width: 100%; }
+      .fields { gap: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="header">
+      <div class="title-wrap">
+        <h1 id="pageTitle">Water Pipeline</h1>
+        <div class="sub" id="pageSub">Water data ingestion · MongoDB, TiDB and CrateDB</div>
+      </div>
+      <div class="meta">
+        <span class="chip accent" id="runtimeChip"><span class="dot-mini"></span><span>{{ config.runtime }}</span></span>
+        <span class="chip" id="backendChip"><span class="dot-mini"></span><span>{{ config.email_backend }}</span></span>
+        <span class="chip {% if config.email_enabled %}ok{% else %}warn{% endif %}" id="emailChip"><span class="dot-mini"></span><span>{% if config.email_enabled %}email on{% else %}email off{% endif %}</span></span>
+        <span class="chip {% if config.brevo_ready %}ok{% else %}warn{% endif %}" id="brevoChip"><span class="dot-mini"></span><span>{% if config.brevo_ready %}brevo ready{% else %}brevo missing{% endif %}</span></span>
+      </div>
+    </div>
+
+    <div class="source-row">
+      <div class="source-select-wrap">
+        <select id="sourceSelect" onchange="switchSource(this.value)">
+          <option value="github">Water (GitHub)</option>
+          <option value="local">Water (Local Inputs)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="card-title" id="fileCardTitle">Files in repository</div>
+        <div id="fileList"><span class="fmsg">Loading...</span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Configuration</div>
+        <div class="fields">
+          <div class="field">
+            <label for="start_date">Start date</label>
+            <input type="date" id="start_date" />
+          </div>
+          <div class="field">
+            <label for="days_back">Days back</label>
+            <input type="number" id="days_back" value="2" min="1" max="365" />
+          </div>
+        </div>
+        <div class="toggle-row">
+          <input type="checkbox" id="send_email" checked />
+          <label for="send_email" style="margin:0;">Send email after run</label>
+        </div>
+        <button class="btn-run" id="runBtn" onclick="runPipeline()">▶ Run pipeline</button>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Output log</div>
+        <div class="status-row"><div class="dot" id="dot"></div><span id="status">ready</span></div>
+        <div id="log"><span class="dim">— waiting for run —</span></div>
+        <div class="footer-note" id="footerNote">Render timestamp: {{ timestamp_utc }}</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const DEFAULT_SOURCE = {{ ('github' if config.runtime == 'render' else 'local') | tojson }};
+    const DEFAULT_SEND_EMAIL = {{ config.run_send_email_default | tojson }};
+
+    const today = new Date();
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 2);
+    document.getElementById('start_date').value = d.toISOString().split('T')[0];
+    document.getElementById('send_email').checked = DEFAULT_SEND_EMAIL;
+    document.getElementById('sourceSelect').value = DEFAULT_SOURCE;
+
+    function setStatus(txt, state) {
+      document.getElementById('status').textContent = txt;
+      document.getElementById('dot').className = 'dot' + (state ? ' ' + state : '');
+    }
+
+    function appendLine(txt, cls) {
+      const log = document.getElementById('log');
+      const ph = log.querySelector('.dim');
+      if (ph) ph.remove();
+      const div = document.createElement('div');
+      if (cls) div.className = cls;
+      div.textContent = txt;
+      log.appendChild(div);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function formatDateLabel(value) {
+      if (!value) return '-';
+      return value;
+    }
+
+    async function loadFiles(source) {
+      const list = document.getElementById('fileList');
+      list.innerHTML = '<span class="fmsg">Loading...</span>';
+      try {
+        const response = await fetch(`/files?source=${encodeURIComponent(source)}`);
+        const data = await response.json();
+        const files = data.files || [];
+        const mode = data.mode || source;
+        document.getElementById('fileCardTitle').textContent = mode === 'GITHUB_API' || source === 'github'
+          ? 'Files in repository'
+          : 'Files in local inputs';
+        if (!files.length) {
+          list.innerHTML = '<span class="fmsg">No files found.</span>';
+          return;
+        }
+        list.innerHTML = files.map(fileName => (
+          `<div class="file-row"><span class="fdot"></span><span>${fileName}</span></div>`
+        )).join('');
+      } catch (error) {
+        list.innerHTML = '<span class="fmsg">Could not load file list.</span>';
+      }
+    }
+
+    function switchSource(source) {
+      const normalized = source === 'local' ? 'local' : 'github';
+      if (normalized === 'github') {
+        document.getElementById('pageTitle').textContent = 'Water Pipeline';
+        document.getElementById('pageSub').textContent = 'Water data ingestion · MongoDB, TiDB and CrateDB';
+        document.getElementById('backendChip').querySelector('span:last-child').textContent = '{{ config.email_backend }}';
+      } else {
+        document.getElementById('pageTitle').textContent = 'Water Pipeline';
+        document.getElementById('pageSub').textContent = 'Local test inputs · anomaly validation';
+      }
+      loadFiles(normalized);
+    }
+
+    async function runPipeline() {
+      const btn = document.getElementById('runBtn');
+      const payload = {
+        source: document.getElementById('sourceSelect').value,
+        start_date: document.getElementById('start_date').value,
+        days_back: parseInt(document.getElementById('days_back').value, 10),
+        send_email: document.getElementById('send_email').checked,
+      };
+
+      document.getElementById('log').innerHTML = '';
+      setStatus('running...', 'running');
+      btn.disabled = true;
+
+      try {
+        const response = await fetch('/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          appendLine('error: ' + (data.error || 'pipeline failed'), 'err');
+          if (data.hint) appendLine('hint: ' + data.hint, 'warn');
+          setStatus('error', 'error');
+          btn.disabled = false;
+          return;
+        }
+
+        appendLine(`status: ${data.status}`, 'ok');
+        appendLine(`mode: ${data.mode}`);
+        appendLine(`files selected: ${data.files_selected}`);
+        appendLine(`records: ${data.records}`);
+        appendLine(`elapsed seconds: ${data.elapsed_seconds}`);
+
+        if (data.mongodb) {
+          appendLine(`[mongodb] ${data.mongodb.status} | inserted ${data.mongodb.inserted ?? 0} | duplicates ${data.mongodb.duplicates ?? 0}`,
+            data.mongodb.status === 'ok' ? 'ok' : 'err');
+        }
+        if (data.tidb) {
+          appendLine(`[tidb] ${data.tidb.status} | written ${data.tidb.written ?? 0} | rows ${data.tidb.table_count ?? 0}`,
+            data.tidb.status === 'ok' ? 'ok' : 'err');
+        }
+        if (data.cratedb) {
+          appendLine(`[cratedb] ${data.cratedb.status}${data.cratedb.error ? ' | ' + data.cratedb.error : ''}`,
+            data.cratedb.status === 'ok' ? 'ok' : 'err');
+        }
+
+        const anomalies = data.anomalies || {};
+        appendLine(`anomalies: ${anomalies.anomalous_counters ?? 0} | below ${anomalies.below_threshold_counters ?? 0} | above ${anomalies.above_threshold_counters ?? 0}`,
+          (anomalies.anomalous_counters || anomalies.counters_without_history) ? 'warn' : 'ok');
+        if (anomalies.current_day) {
+          appendLine(`current day: ${anomalies.current_day}`);
+        }
+        if (anomalies.compared_history_days) {
+          appendLine(`history days: ${(anomalies.compared_history_days || []).join(', ')}`);
+        }
+        if (data.email_dispatch) {
+          const emailStatus = data.email_dispatch.status || 'unknown';
+          appendLine(`[email] ${emailStatus}${data.email_dispatch.provider ? ' via ' + data.email_dispatch.provider : ''}${data.email_dispatch.error ? ' | ' + data.email_dispatch.error : ''}${data.email_dispatch.reason ? ' | ' + data.email_dispatch.reason : ''}`,
+            emailStatus === 'ok' || emailStatus === 'attempted' ? 'ok' : 'err');
+        }
+
+        setStatus('done', 'done');
+      } catch (error) {
+        appendLine('connection lost', 'err');
+        setStatus('error', 'error');
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    loadFiles(DEFAULT_SOURCE);
+  </script>
+</body>
+</html>

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from datetime import datetime, timezone
 
-from flask import Flask, jsonify, request
-from scripts.pip_water import CONFIG, run_pipeline, send_email_summary
+from flask import Flask, jsonify, render_template, request
+from scripts.pip_water import CONFIG, list_candidate_files, run_pipeline, send_email_summary
 
 app = Flask(__name__)
 
@@ -16,6 +17,77 @@ def _env_bool(name: str, default: str = 'false') -> bool:
 
 def _request_runtime_label() -> str:
     return 'render' if os.getenv('RENDER') or os.getenv('RENDER_SERVICE_ID') or os.getenv('RENDER_EXTERNAL_URL') else 'flask'
+
+
+def _source_mode_from_request(value: object) -> str:
+    source = str(value or '').strip().lower()
+    if source in {'github', 'fronius', 'repo', 'github_api'}:
+        return 'github'
+    if source in {'local', 'local_json_dir'}:
+        return 'local'
+    if source in {'urls', 'json_file_urls', 'custom'}:
+        return 'urls'
+    return 'github'
+
+
+def _snapshot_pipeline_config() -> dict[str, object]:
+    keys = ['json_file_urls', 'local_json_dir', 'repo_json_files', 'start_date', 'days_back', 'max_files']
+    return {key: CONFIG.get(key) for key in keys}
+
+
+def _apply_request_overrides(payload: dict) -> dict[str, object]:
+    backup = _snapshot_pipeline_config()
+
+    if payload.get('start_date'):
+        CONFIG['start_date'] = str(payload.get('start_date'))
+    if payload.get('days_back') is not None:
+        try:
+            CONFIG['days_back'] = int(payload.get('days_back'))
+        except Exception:
+            pass
+    if payload.get('max_files') is not None:
+        try:
+            CONFIG['max_files'] = int(payload.get('max_files'))
+        except Exception:
+            pass
+
+    source = _source_mode_from_request(payload.get('source'))
+    if source == 'github':
+        CONFIG['json_file_urls'] = ''
+        CONFIG['local_json_dir'] = ''
+        CONFIG['repo_json_files'] = ''
+    elif source == 'local':
+        CONFIG['json_file_urls'] = ''
+        CONFIG['repo_json_files'] = ''
+        default_local_dir = str(Path(__file__).resolve().parent / 'localINPUTS')
+        CONFIG['local_json_dir'] = str(payload.get('local_json_dir') or CONFIG.get('local_json_dir') or default_local_dir)
+    elif source == 'urls':
+        CONFIG['local_json_dir'] = ''
+        CONFIG['repo_json_files'] = ''
+        if payload.get('json_file_urls') is not None:
+            CONFIG['json_file_urls'] = str(payload.get('json_file_urls') or '')
+
+    return backup
+
+
+def _restore_request_overrides(backup: dict[str, object]) -> None:
+    for key, value in backup.items():
+        CONFIG[key] = value
+
+
+def _build_file_list_payload(source: str = 'github') -> dict[str, object]:
+    payload = {'source': source}
+    backup = _apply_request_overrides(payload)
+    try:
+        files, mode = list_candidate_files()
+        return {
+            'source': source,
+            'mode': mode,
+            'files': [item['name'] for item in files],
+            'count': len(files),
+        }
+    finally:
+        _restore_request_overrides(backup)
 
 
 def _email_readiness() -> dict:
@@ -52,19 +124,14 @@ def _email_readiness() -> dict:
 # =========================
 @app.get('/')
 def home():
-    return jsonify(
-        {
-            'service': 'Water Pipeline API',
-            'status': 'online',
-            'runtime': os.getenv('RENDER', 'local'),
-            'available_endpoints': {
-                'health': '/health',
-                'run_pipeline': '/run',
-                'config': '/config',
-            },
-            'timestamp_utc': datetime.now(timezone.utc).isoformat(),
-        }
-    ), 200
+    config = {
+        'runtime': _request_runtime_label(),
+        'email_backend': str(CONFIG.get('email_backend', 'smtp')).strip().lower(),
+        'email_enabled': bool(CONFIG.get('email_enabled')),
+        'brevo_ready': bool(CONFIG.get('brevo_api_key')) and bool(CONFIG.get('brevo_sender_email')),
+        'run_send_email_default': _env_bool('RUN_SEND_EMAIL_DEFAULT', 'true'),
+    }
+    return render_template('index.html', config=config, timestamp_utc=datetime.now(timezone.utc).isoformat())
 
 
 # =========================
@@ -77,6 +144,16 @@ def health() -> tuple[dict, int]:
         'service': 'pip-water-flask',
         'timestamp_utc': datetime.now(timezone.utc).isoformat(),
     }, 200
+
+
+# =========================
+# FILES LIST
+# =========================
+@app.get('/files')
+def files_list() -> tuple[dict, int]:
+    source = request.args.get('source', 'github')
+    payload = _build_file_list_payload(source)
+    return payload, 200
 
 
 # =========================
@@ -99,11 +176,13 @@ def run_once() -> tuple[dict, int]:
         send_email = bool(send_email_raw)
 
     previous_runtime = os.getenv('PIPELINE_RUNTIME')
+    config_backup = _apply_request_overrides(payload)
     os.environ['PIPELINE_RUNTIME'] = _request_runtime_label()
 
     try:
         result = run_pipeline()
     finally:
+        _restore_request_overrides(config_backup)
         if previous_runtime is None:
             os.environ.pop('PIPELINE_RUNTIME', None)
         else:

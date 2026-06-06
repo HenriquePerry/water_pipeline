@@ -1244,7 +1244,11 @@ def build_meter_anomaly_report(current_df: pd.DataFrame, run_id: str, lookback_d
                 'device': row.get('device', ''),
                 'alias': row.get('alias', ''),
                 'current_count': current_count,
+                'current_count_n': current_count,
+                'current_water_sum_l': round(float(row.get('current_water_sum_l') or 0.0), 2),
                 'expected_count': expected_count,
+                'expected_count_n': expected_count,
+                'expected_water_l': round(float(row.get('expected_water_l') or 0.0), 2),
                 'delta_count': delta_count,
                 'delta_percentage': delta_percentage,
                 'anomaly_direction': anomaly_direction,
@@ -1374,33 +1378,60 @@ def _build_anomaly_table_html(anomaly_report: dict[str, Any] | None) -> str:
     table_rows: list[str] = []
     for item in top_details:
         contador = str(item.get('contador', ''))
-        expected = float(item.get('expected_total_count', item.get('expected_count', 0)) or 0)
-        current = int(item.get('current_count', 0) or 0)
+        expected_water = float(item.get('expected_water_l', item.get('expected_total_count', item.get('expected_count', 0))) or 0.0)
+        current_water = float(item.get('current_water_sum_l', item.get('current_count', 0)) or 0.0)
+        expected_n = int(round(float(item.get('expected_count_n', item.get('expected_count', 0)) or 0.0)))
+        current_n = int(round(float(item.get('current_count_n', item.get('current_count', 0)) or 0.0)))
         direction = str(item.get('anomaly_direction', 'below_expected'))
-        delta_count = float(item.get('delta_count', round(current - expected, 2)) or 0.0)
-        delta_pct = float(item.get('delta_percentage', (abs(delta_count) / expected * 100) if expected else 0.0) or 0.0)
+        delta_water = round(current_water - expected_water, 2)
+        if expected_water > 0:
+            delta_water_pct = round((abs(delta_water) / expected_water) * 100, 1)
+        else:
+            delta_water_pct = 0.0 if current_water == 0 else 100.0
+        delta_n = current_n - expected_n
+        if expected_n > 0:
+            delta_n_pct = round((abs(delta_n) / expected_n) * 100, 1)
+        else:
+            delta_n_pct = 0.0 if current_n == 0 else 100.0
         type_label = 'Acima do esperado' if direction == 'above_expected' else 'Abaixo do esperado'
         delta_color = '#f0ad4e' if direction == 'above_expected' else '#d9534f'
-        delta_prefix = '+' if delta_count > 0 else ''
+        delta_color_water = '#2e7d32' if delta_water == 0 and delta_water_pct == 0.0 else delta_color
+        delta_color_n = '#2e7d32' if delta_n == 0 and delta_n_pct == 0.0 else delta_color
+        type_label_water = 'Esperado' if delta_water_pct == 0.0 else type_label
+        type_color_water = '#2e7d32' if delta_water_pct == 0.0 else delta_color_water
+        type_label_n = 'Esperado' if delta_n_pct == 0.0 else type_label
+        type_color_n = '#2e7d32' if delta_n_pct == 0.0 else delta_color_n
+        delta_water_prefix = '+' if delta_water > 0 else ''
+        delta_n_prefix = '+' if delta_n > 0 else ''
 
         table_rows.append(
             "<tr>"
             f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:left'>{contador}</td>"
-            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right'>{expected:.2f}</td>"
-            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right'>{current}</td>"
-            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right;color:{delta_color}'>{delta_prefix}{delta_count:.2f}</td>"
-            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right;color:{delta_color}'>{delta_pct:.1f}%</td>"
-            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:left;color:{delta_color}'>{type_label}</td>"
+            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right'>{expected_water:.2f}</td>"
+            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right'>{current_water:.2f}</td>"
+            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right;color:{delta_color_water}'>{delta_water_prefix}{delta_water:.2f}</td>"
+            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right;color:{delta_color_water}'>{delta_water_pct:.1f}%</td>"
+            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:left;color:{type_color_water}'>{type_label_water}</td>"
+            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right'>{expected_n:d}</td>"
+            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right'>{current_n:d}</td>"
+            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right;color:{delta_color_n}'>{delta_n_prefix}{delta_n:d}</td>"
+            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:right;color:{delta_color_n}'>{delta_n_pct:.1f}%</td>"
+            f"<td style='border:1px solid #ccc;padding:4px 6px;text-align:left;color:{type_color_n}'>{type_label_n}</td>"
             "</tr>"
         )
 
     head = (
         "<tr>"
         "<th style='border:1px solid #ccc;padding:4px 6px;text-align:left;background:#f9f9f9;color:#d9534f'>Contador</th>"
-        f"<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Contagem esperada (media {lookback_days}d)</th>"
-        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Contagem atual</th>"
-        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Diferenca</th>"
-        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Variacao (%)</th>"
+        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Contagem esperada</th>"
+        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Contagem lida</th>"
+        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Diferença</th>"
+        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Variação(%)</th>"
+        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:left;background:#f9f9f9;color:#d9534f'>Tipo</th>"
+        f"<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>N leituras esperadas (media {lookback_days}d)</th>"
+        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>N leituras lidas</th>"
+        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Diferença</th>"
+        "<th style='border:1px solid #ccc;padding:4px 6px;text-align:right;background:#f9f9f9;color:#d9534f'>Variação(%)</th>"
         "<th style='border:1px solid #ccc;padding:4px 6px;text-align:left;background:#f9f9f9;color:#d9534f'>Tipo</th>"
         "</tr>"
     )
@@ -1610,6 +1641,7 @@ def _send_email_via_brevo(subject: str, text_body: str, html_body: str, recipien
     )
 
     if response.ok:
+        print("email enviado via brevo")
         return {'status': 'ok', 'provider': 'brevo', 'response': response.json() if response.content else {}}
 
     return {

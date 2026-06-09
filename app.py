@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import os
+import threading
+import uuid
 from pathlib import Path
-
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template, request
 from scripts.pip_water import CONFIG, list_candidate_files, run_pipeline, send_email_summary
+
+# In-memory job store: job_id -> {status, result, error, started_at}
+_JOBS: dict[str, dict] = {}
+_JOBS_LOCK = threading.Lock()
 
 app = Flask(__name__)
 
@@ -157,15 +162,62 @@ def files_list() -> tuple[dict, int]:
 
 
 # =========================
-# RUN PIPELINE
+# BACKGROUND WORKER
+# =========================
+def _run_pipeline_job(job_id: str, payload: dict, send_email: bool, runtime_label: str) -> None:
+    previous_runtime = os.getenv('PIPELINE_RUNTIME')
+    config_backup = _apply_request_overrides(payload)
+    os.environ['PIPELINE_RUNTIME'] = runtime_label
+
+    try:
+        result = run_pipeline()
+    except Exception as exc:
+        result = {'status': 'error', 'error': str(exc)}
+    finally:
+        _restore_request_overrides(config_backup)
+        if previous_runtime is None:
+            os.environ.pop('PIPELINE_RUNTIME', None)
+        else:
+            os.environ['PIPELINE_RUNTIME'] = previous_runtime
+
+    if send_email and result.get('status') in {'ok', 'error'}:
+        readiness = _email_readiness()
+        if not readiness.get('ready'):
+            result['email_dispatch'] = {
+                'status': 'skipped',
+                'reason': 'email configuration is incomplete or disabled',
+                'checks': readiness,
+            }
+        else:
+            try:
+                send_result = send_email_summary(result)
+                result['email_dispatch'] = {
+                    'status': str(send_result.get('status', 'attempted')),
+                    'provider': send_result.get('provider'),
+                    'reason': send_result.get('reason'),
+                    'error': send_result.get('error'),
+                    'checks': readiness,
+                }
+            except Exception as exc:
+                result['email_dispatch'] = {
+                    'status': 'error',
+                    'error': str(exc),
+                    'checks': readiness,
+                }
+
+    with _JOBS_LOCK:
+        _JOBS[job_id]['status'] = 'done'
+        _JOBS[job_id]['result'] = result
+
+
+# =========================
+# RUN PIPELINE (async)
 # =========================
 @app.post('/run')
 def run_once() -> tuple[dict, int]:
-    """
-    Triggers one pipeline execution and returns the result JSON.
-    """
-
+    """Starts a pipeline job in background and returns a job_id immediately."""
     payload = request.get_json(silent=True) or {}
+
     send_email_default = _env_bool('RUN_SEND_EMAIL_DEFAULT', 'true')
     send_email_raw = payload.get('send_email')
     if send_email_raw is None:
@@ -175,55 +227,38 @@ def run_once() -> tuple[dict, int]:
     else:
         send_email = bool(send_email_raw)
 
-    previous_runtime = os.getenv('PIPELINE_RUNTIME')
-    config_backup = _apply_request_overrides(payload)
-    os.environ['PIPELINE_RUNTIME'] = _request_runtime_label()
+    job_id = str(uuid.uuid4())
+    with _JOBS_LOCK:
+        _JOBS[job_id] = {
+            'status': 'running',
+            'result': None,
+            'started_at': datetime.now(timezone.utc).isoformat(),
+        }
 
-    try:
-        result = run_pipeline()
-    finally:
-        _restore_request_overrides(config_backup)
-        if previous_runtime is None:
-            os.environ.pop('PIPELINE_RUNTIME', None)
-        else:
-            os.environ['PIPELINE_RUNTIME'] = previous_runtime
+    t = threading.Thread(
+        target=_run_pipeline_job,
+        args=(job_id, payload, send_email, _request_runtime_label()),
+        daemon=True,
+    )
+    t.start()
 
-    if send_email and result.get('status') in {'ok', 'error'}:
+    return jsonify({'job_id': job_id, 'status': 'running'}), 202
 
-        readiness = _email_readiness()
 
-        if not readiness.get('ready'):
-
-            result['email_dispatch'] = {
-                'status': 'skipped',
-                'reason': 'email configuration is incomplete or disabled',
-                'checks': readiness,
-            }
-
-        else:
-
-            try:
-                send_result = send_email_summary(result)
-
-                result['email_dispatch'] = {
-                    'status': str(send_result.get('status', 'attempted')),
-                    'provider': send_result.get('provider'),
-                    'reason': send_result.get('reason'),
-                    'error': send_result.get('error'),
-                    'checks': readiness,
-                }
-
-            except Exception as exc:
-
-                result['email_dispatch'] = {
-                    'status': 'error',
-                    'error': str(exc),
-                    'checks': readiness,
-                }
-
+# =========================
+# JOB STATUS
+# =========================
+@app.get('/status/<job_id>')
+def job_status(job_id: str) -> tuple[dict, int]:
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+    if not job:
+        return jsonify({'error': 'job not found'}), 404
+    if job['status'] == 'running':
+        return jsonify({'job_id': job_id, 'status': 'running', 'started_at': job['started_at']}), 202
+    result = job.get('result') or {}
     http_status = 200 if result.get('status') == 'ok' else 500
-
-    return jsonify(result), http_status
+    return jsonify({'job_id': job_id, 'status': 'done', 'result': result}), http_status
 
 
 # =========================

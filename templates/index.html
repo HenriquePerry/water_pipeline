@@ -453,6 +453,75 @@
       loadFiles(normalized);
     }
 
+    function renderResult(data) {
+      appendLine(`status: ${data.status}`, data.status === 'ok' ? 'ok' : 'err');
+      if (data.mode) appendLine(`mode: ${data.mode}`);
+      if (data.files_selected != null) appendLine(`files selected: ${data.files_selected}`);
+      if (data.records != null) appendLine(`records: ${data.records}`);
+      if (data.elapsed_seconds != null) appendLine(`elapsed: ${data.elapsed_seconds}s`);
+      if (data.error) appendLine(`error: ${data.error}`, 'err');
+      if (data.hint) appendLine(`hint: ${data.hint}`, 'warn');
+
+      if (data.mongodb) {
+        appendLine(`[mongodb] ${data.mongodb.status} | inserted ${data.mongodb.inserted ?? 0} | duplicates ${data.mongodb.duplicates ?? 0}`,
+          data.mongodb.status === 'ok' ? 'ok' : 'err');
+      }
+      if (data.tidb) {
+        appendLine(`[tidb] ${data.tidb.status} | written ${data.tidb.written ?? 0} | rows ${data.tidb.table_count ?? 0}`,
+          data.tidb.status === 'ok' ? 'ok' : 'err');
+      }
+      if (data.cratedb) {
+        appendLine(`[cratedb] ${data.cratedb.status}${data.cratedb.error ? ' | ' + data.cratedb.error : ''}`,
+          data.cratedb.status === 'ok' ? 'ok' : 'err');
+      }
+
+      const anomalies = data.anomalies || {};
+      if (data.anomalies) {
+        appendLine(
+          `anomalies: ${anomalies.anomalous_counters ?? 0} | below ${anomalies.below_threshold_counters ?? 0} | above ${anomalies.above_threshold_counters ?? 0}`,
+          (anomalies.anomalous_counters || anomalies.counters_without_history) ? 'warn' : 'ok'
+        );
+        if (anomalies.current_day) appendLine(`current day: ${anomalies.current_day}`);
+        if (anomalies.compared_history_days && anomalies.compared_history_days.length)
+          appendLine(`history days: ${anomalies.compared_history_days.join(', ')}`);
+      }
+
+      if (data.email_dispatch) {
+        const emailStatus = data.email_dispatch.status || 'unknown';
+        appendLine(
+          `[email] ${emailStatus}${data.email_dispatch.provider ? ' via ' + data.email_dispatch.provider : ''}${data.email_dispatch.error ? ' | ' + data.email_dispatch.error : ''}${data.email_dispatch.reason ? ' | ' + data.email_dispatch.reason : ''}`,
+          emailStatus === 'ok' ? 'ok' : emailStatus === 'skipped' ? null : 'err'
+        );
+      }
+    }
+
+    async function pollJob(jobId, btn, dotMs) {
+      const POLL_INTERVAL = 3000;
+      const MAX_WAIT_MS = 15 * 60 * 1000;
+      const started = Date.now();
+
+      while (Date.now() - started < MAX_WAIT_MS) {
+        await new Promise(r => setTimeout(r, POLL_INTERVAL));
+        const elapsed = Math.round((Date.now() - dotMs) / 1000);
+        setStatus(`running... ${elapsed}s`, 'running');
+        try {
+          const resp = await fetch(`/status/${jobId}`);
+          const data = await resp.json();
+          if (data.status === 'running') continue;
+          // done
+          renderResult(data.result || data);
+          setStatus('done', 'done');
+          btn.disabled = false;
+          return;
+        } catch (_) {
+          // transient network hiccup - keep polling
+        }
+      }
+      appendLine('timeout: pipeline is taking too long, check logs on Render', 'warn');
+      setStatus('timeout', 'error');
+      btn.disabled = false;
+    }
+
     async function runPipeline() {
       const btn = document.getElementById('runBtn');
       const payload = {
@@ -463,7 +532,7 @@
       };
 
       document.getElementById('log').innerHTML = '';
-      setStatus('running...', 'running');
+      setStatus('starting...', 'running');
       btn.disabled = true;
 
       try {
@@ -474,53 +543,22 @@
         });
 
         const data = await response.json();
-        if (!response.ok) {
-          appendLine('error: ' + (data.error || 'pipeline failed'), 'err');
+        if (!response.ok && !data.job_id) {
+          appendLine('error: ' + (data.error || 'could not start pipeline'), 'err');
           if (data.hint) appendLine('hint: ' + data.hint, 'warn');
           setStatus('error', 'error');
           btn.disabled = false;
           return;
         }
 
-        appendLine(`status: ${data.status}`, 'ok');
-        appendLine(`mode: ${data.mode}`);
-        appendLine(`files selected: ${data.files_selected}`);
-        appendLine(`records: ${data.records}`);
-        appendLine(`elapsed seconds: ${data.elapsed_seconds}`);
+        const jobId = data.job_id;
+        appendLine(`job started: ${jobId}`);
+        setStatus('running... 0s', 'running');
+        await pollJob(jobId, btn, Date.now());
 
-        if (data.mongodb) {
-          appendLine(`[mongodb] ${data.mongodb.status} | inserted ${data.mongodb.inserted ?? 0} | duplicates ${data.mongodb.duplicates ?? 0}`,
-            data.mongodb.status === 'ok' ? 'ok' : 'err');
-        }
-        if (data.tidb) {
-          appendLine(`[tidb] ${data.tidb.status} | written ${data.tidb.written ?? 0} | rows ${data.tidb.table_count ?? 0}`,
-            data.tidb.status === 'ok' ? 'ok' : 'err');
-        }
-        if (data.cratedb) {
-          appendLine(`[cratedb] ${data.cratedb.status}${data.cratedb.error ? ' | ' + data.cratedb.error : ''}`,
-            data.cratedb.status === 'ok' ? 'ok' : 'err');
-        }
-
-        const anomalies = data.anomalies || {};
-        appendLine(`anomalies: ${anomalies.anomalous_counters ?? 0} | below ${anomalies.below_threshold_counters ?? 0} | above ${anomalies.above_threshold_counters ?? 0}`,
-          (anomalies.anomalous_counters || anomalies.counters_without_history) ? 'warn' : 'ok');
-        if (anomalies.current_day) {
-          appendLine(`current day: ${anomalies.current_day}`);
-        }
-        if (anomalies.compared_history_days) {
-          appendLine(`history days: ${(anomalies.compared_history_days || []).join(', ')}`);
-        }
-        if (data.email_dispatch) {
-          const emailStatus = data.email_dispatch.status || 'unknown';
-          appendLine(`[email] ${emailStatus}${data.email_dispatch.provider ? ' via ' + data.email_dispatch.provider : ''}${data.email_dispatch.error ? ' | ' + data.email_dispatch.error : ''}${data.email_dispatch.reason ? ' | ' + data.email_dispatch.reason : ''}`,
-            emailStatus === 'ok' || emailStatus === 'attempted' ? 'ok' : 'err');
-        }
-
-        setStatus('done', 'done');
       } catch (error) {
-        appendLine('connection lost', 'err');
+        appendLine('connection error: ' + error.message, 'err');
         setStatus('error', 'error');
-      } finally {
         btn.disabled = false;
       }
     }

@@ -6,3 +6,4 @@ pymysql
 psycopg2-binary
 flask
 gunicorn
+certifi

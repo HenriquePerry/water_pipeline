@@ -565,10 +565,21 @@ def save_to_mongodb(df: pd.DataFrame, run_id: str) -> dict[str, Any]:
             'total': total,
         }
     except Exception as exc:
+        error_text = str(exc)
+        hint = None
+        if 'SSL handshake failed' in error_text or 'tlsv1 alert' in error_text.lower():
+            hint = (
+                'Mongo TLS handshake failed. On Render verify: '
+                '1) PYTHON_VERSION is stable (3.11/3.12), '
+                '2) certifi is installed, '
+                '3) Atlas Network Access allows Render egress (or 0.0.0.0/0 for test), '
+                '4) MONGO_URI is correct and URL-encoded.'
+            )
         return {
             'enabled': True,
             'status': 'error',
-            'error': str(exc),
+            'error': error_text,
+            'hint': hint,
             'db': CONFIG['mongo_db'],
             'collection': CONFIG['mongo_collection'],
         }

@@ -1786,6 +1786,13 @@ def run_pipeline() -> dict[str, Any]:
             files = files[:max_files]
 
         if not files:
+            days_back = int(CONFIG.get('days_back', 0) or 0)
+            start_date = str(CONFIG.get('start_date', ''))
+            if days_back > 0:
+                raise RuntimeError(
+                    f'No JSON files found to process for start_date={start_date} and days_back={days_back}. '
+                    'Adjust the date window or set DAYS_BACK=0 to disable date filtering.'
+                )
             raise RuntimeError('No JSON files found to process.')
 
         if CONFIG['verbose']:

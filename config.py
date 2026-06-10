@@ -35,6 +35,11 @@ cratedb_password_value = env_or_colab_secret('CRATEDB_PASSWORD', '').strip()
 cratedb_database_value = env_or_colab_secret('CRATEDB_DATABASE', 'crate').strip()
 cratedb_table_value = env_or_colab_secret('CRATEDB_TABLE', 'water_records').strip()
 cratedb_sslmode_value = env_or_colab_secret('CRATEDB_SSLMODE', 'require').strip()
+github_secret_name_value = env_or_colab_secret('GITHUB_SECRET_NAME', '').strip()
+if not github_secret_name_value:
+	user_prefix = env_or_colab_secret('USER', '').strip()
+	if user_prefix:
+		github_secret_name_value = f'{user_prefix}_github_json'
 
 CONFIG = {
 	'repo_owner': os.getenv('REPO_OWNER', 'pedroccpimenta'),
@@ -49,18 +54,18 @@ CONFIG = {
 	'local_json_dir': os.getenv('LOCAL_JSON_DIR', ''),
 	'repo_json_files': os.getenv('REPO_JSON_FILES', ''),
 	'verbose': _env_bool('VERBOSE', 'true'),
-	'email_enabled': _env_bool('EMAIL_ENABLED', 'false'),
-	'email_smtp_host': os.getenv('EMAIL_SMTP_HOST', 'smtp.gmail.com'),
-	'email_smtp_port': int(os.getenv('EMAIL_SMTP_PORT', '587')),
-	'email_from': os.getenv('EMAIL_FROM', ''),
-	'email_to': os.getenv('EMAIL_TO', ''),
-	'email_username': os.getenv('EMAIL_USERNAME', ''),
-	'email_password': os.getenv('EMAIL_PASSWORD', ''),
-	'email_backend': _env_or_default('EMAIL_BACKEND', 'brevo' if is_render() else 'smtp'),
+	'email_enabled': str(env_or_colab_secret('EMAIL_ENABLED', 'false')).strip().lower() in {'1', 'true', 'yes', 'on'},
+	'email_smtp_host': env_or_colab_secret('EMAIL_SMTP_HOST', 'smtp.gmail.com'),
+	'email_smtp_port': int(env_or_colab_secret('EMAIL_SMTP_PORT', '587')),
+	'email_from': env_or_colab_secret('EMAIL_FROM', ''),
+	'email_to': env_or_colab_secret('EMAIL_TO', ''),
+	'email_username': env_or_colab_secret('EMAIL_USERNAME', ''),
+	'email_password': env_or_colab_secret('EMAIL_PASSWORD', ''),
+	'email_backend': env_or_colab_secret('EMAIL_BACKEND', _env_or_default('EMAIL_BACKEND', 'brevo' if is_render() else 'smtp')),
 	'brevo_api_key': _env_or_default('BREVO_API_KEY', ''),
 	'brevo_sender_name': _env_or_default('BREVO_SENDER_NAME', ''),
 	'brevo_sender_email': _env_or_default('BREVO_SENDER_EMAIL', ''),
-	'github_secret_name': os.getenv('GITHUB_SECRET_NAME', '').strip(),
+	'github_secret_name': github_secret_name_value,
 	'mongo_uri': mongo_uri_value,
 	'mongo_enabled': _env_bool('MONGO_ENABLED', 'false') or bool(mongo_uri_value),
 	'mongo_db': os.getenv('MONGO_DB', 'pi_water').strip(),

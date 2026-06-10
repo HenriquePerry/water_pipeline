@@ -617,7 +617,7 @@ def save_to_tidb(df: pd.DataFrame, run_id: str) -> dict[str, Any]:
 
     ca_path = (CONFIG.get('tidb_ca_path') or '').strip()
     if ca_path and not os.path.exists(ca_path):
-        if is_colab() and certifi is not None:
+        if certifi is not None:
             ca_path = certifi.where()
         else:
             return {
@@ -647,7 +647,10 @@ def save_to_tidb(df: pd.DataFrame, run_id: str) -> dict[str, Any]:
             'enabled': True,
             'status': 'error',
             'error': str(exc),
-            'hint': 'No Colab usa TIDB_CA_PATH vazio ou /content/... e deixa o script usar certifi automaticamente.',
+            'hint': (
+                'TiDB connection failed. If running on Render leave TIDB_CA_PATH empty '
+                'or rely on certifi fallback; verify host/user/password/database/table.'
+            ),
         }
 
     create_database_sql = f"CREATE DATABASE IF NOT EXISTS `{CONFIG['tidb_database']}`"
@@ -756,10 +759,18 @@ def save_to_cratedb(df: pd.DataFrame, run_id: str) -> dict[str, Any]:
             sslmode=CONFIG['cratedb_sslmode'],
         )
     except Exception as exc:
+        error_text = str(exc)
+        hint = None
+        if 'SSL SYSCALL error: EOF detected' in error_text or 'EOF detected' in error_text:
+            hint = (
+                'CrateDB SSL EOF. Check CRATEDB_HOST/PORT, ensure cluster is running, '
+                'and verify network/IP allowlist and credentials on the provider side.'
+            )
         return {
             'enabled': True,
             'status': 'error',
-            'error': str(exc),
+            'error': error_text,
+            'hint': hint,
             'db': CONFIG['cratedb_database'],
             'table': CONFIG['cratedb_table'],
         }
@@ -821,10 +832,18 @@ def save_to_cratedb(df: pd.DataFrame, run_id: str) -> dict[str, Any]:
             'table_count': table_count,
         }
     except Exception as exc:
+        error_text = str(exc)
+        hint = None
+        if 'SSL SYSCALL error: EOF detected' in error_text or 'EOF detected' in error_text:
+            hint = (
+                'CrateDB write failed with SSL EOF. Confirm cluster is active and '
+                'CRATEDB_HOST on Render matches the current cluster endpoint.'
+            )
         return {
             'enabled': True,
             'status': 'error',
-            'error': str(exc),
+            'error': error_text,
+            'hint': hint,
             'db': CONFIG['cratedb_database'],
             'table': CONFIG['cratedb_table'],
         }
@@ -983,7 +1002,7 @@ def _load_tidb_history_for_anomalies(lookback_days: int) -> pd.DataFrame:
 
     ca_path = (CONFIG.get('tidb_ca_path') or '').strip()
     if ca_path and not os.path.exists(ca_path):
-        if is_colab() and certifi is not None:
+        if certifi is not None:
             ca_path = certifi.where()
         else:
             return pd.DataFrame(columns=['contador', 'device', 'alias', 'timestamp', 'value_l', 'source_file', '_run_id'])

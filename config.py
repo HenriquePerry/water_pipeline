@@ -41,6 +41,11 @@ if not github_secret_name_value:
 	if user_prefix:
 		github_secret_name_value = f'{user_prefix}_github_json'
 
+brevo_api_key_value = env_or_colab_secret('BREVO_API_KEY', '').strip()
+brevo_sender_name_value = env_or_colab_secret('BREVO_SENDER_NAME', '').strip()
+brevo_sender_email_value = env_or_colab_secret('BREVO_SENDER_EMAIL', '').strip()
+email_backend_default = 'brevo' if (is_render() or (brevo_api_key_value and brevo_sender_email_value)) else 'smtp'
+
 CONFIG = {
 	'repo_owner': os.getenv('REPO_OWNER', 'pedroccpimenta'),
 	'repo_name': os.getenv('REPO_NAME', 'datafiles'),
@@ -61,10 +66,10 @@ CONFIG = {
 	'email_to': env_or_colab_secret('EMAIL_TO', ''),
 	'email_username': env_or_colab_secret('EMAIL_USERNAME', ''),
 	'email_password': env_or_colab_secret('EMAIL_PASSWORD', ''),
-	'email_backend': env_or_colab_secret('EMAIL_BACKEND', _env_or_default('EMAIL_BACKEND', 'brevo' if is_render() else 'smtp')),
-	'brevo_api_key': _env_or_default('BREVO_API_KEY', ''),
-	'brevo_sender_name': _env_or_default('BREVO_SENDER_NAME', ''),
-	'brevo_sender_email': _env_or_default('BREVO_SENDER_EMAIL', ''),
+	'email_backend': env_or_colab_secret('EMAIL_BACKEND', _env_or_default('EMAIL_BACKEND', email_backend_default)),
+	'brevo_api_key': brevo_api_key_value,
+	'brevo_sender_name': brevo_sender_name_value,
+	'brevo_sender_email': brevo_sender_email_value,
 	'github_secret_name': github_secret_name_value,
 	'mongo_uri': mongo_uri_value,
 	'mongo_enabled': _env_bool('MONGO_ENABLED', 'false') or bool(mongo_uri_value),

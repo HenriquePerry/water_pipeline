@@ -7,7 +7,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template, request
-from scripts.pip_water import CONFIG, list_candidate_files, run_pipeline, send_email_summary
+from pipeline import CONFIG, list_candidate_files, run_pipeline, send_email_summary
 
 # In-memory job store: job_id -> {status, result, error, started_at}
 _JOBS: dict[str, dict] = {}
@@ -208,6 +208,60 @@ def _run_pipeline_job(job_id: str, payload: dict, send_email: bool, runtime_labe
     with _JOBS_LOCK:
         _JOBS[job_id]['status'] = 'done'
         _JOBS[job_id]['result'] = result
+
+
+def run_pipeline_now(payload: dict | None = None, send_email: bool | None = None, runtime_label: str = 'google-colab') -> dict:
+    """Runs the pipeline synchronously and returns the result payload.
+
+    Useful for notebooks (e.g. Google Colab) that need direct execution
+    without starting Flask routes or background threads.
+    """
+
+    payload = payload or {}
+    if send_email is None:
+        send_email = _env_bool('RUN_SEND_EMAIL_DEFAULT', 'true')
+
+    previous_runtime = os.getenv('PIPELINE_RUNTIME')
+    config_backup = _apply_request_overrides(payload)
+    os.environ['PIPELINE_RUNTIME'] = runtime_label
+
+    try:
+        result = run_pipeline()
+    except Exception as exc:
+        result = {'status': 'error', 'error': str(exc)}
+    finally:
+        _restore_request_overrides(config_backup)
+        if previous_runtime is None:
+            os.environ.pop('PIPELINE_RUNTIME', None)
+        else:
+            os.environ['PIPELINE_RUNTIME'] = previous_runtime
+
+    if send_email and result.get('status') in {'ok', 'error'}:
+        readiness = _email_readiness()
+        if not readiness.get('ready'):
+            result['email_dispatch'] = {
+                'status': 'skipped',
+                'reason': 'email configuration is incomplete or disabled',
+                'checks': readiness,
+            }
+        else:
+            try:
+                send_result = send_email_summary(result)
+                result['email_dispatch'] = {
+                    'status': str(send_result.get('status', 'attempted')),
+                    'provider': send_result.get('provider'),
+                    'reason': send_result.get('reason'),
+                    'error': send_result.get('error'),
+                    'checks': readiness,
+                }
+            except Exception as exc:
+                result['email_dispatch'] = {
+                    'status': 'error',
+                    'error': str(exc),
+                    'checks': readiness,
+                }
+
+    return result
 
 
 # =========================

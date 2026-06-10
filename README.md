@@ -10,16 +10,24 @@ Pipeline para ingestão, limpeza, persistência e relatório de dados de água, 
 ## Estrutura
 
 ```text
-pi_water.ipynb   # notebook principal com a pipeline completa
+app.py           # Flask app (UI + /run assíncrono + /status)
+pipeline.py      # fachada/orquestração da pipeline
+config.py        # configuração central e contexto de execução
+env_utils.py     # helpers de runtime/env/segredos
+data_parser.py   # descoberta, parsing, limpeza e anomalias
+db_writer.py     # persistência MongoDB / TiDB / CrateDB
+notifier.py      # envio de email e rendering HTML
+pi_water.ipynb   # notebook Colab (clona o repo e corre via `import app`)
 scripts/
-	pip_water.py   # versão em script da mesma pipeline
-	generate_test_anomaly.py
+	pip_water.py   # entrypoint de compatibilidade (legacy shim)
+localINPUTS/
+	test_anomaly_over.json   # ficheiro de teste (anomalia por excesso)
+	test_anomaly_under.json  # ficheiro de teste (anomalia por defeito)
 output_water/
 	water_data_raw.json
 	water_data_clean.csv
 	water_anomaly_report.json
 	water_result.json
-	test_anomaly_sensors.json
 ```
 
 ## Dependências
@@ -45,20 +53,35 @@ As credenciais e opções principais podem ser definidas em `.env` ou em variáv
 
 ## Como executar
 
-### Notebook
+### Google Colab
 
-1. Abre [pi_water.ipynb](pi_water.ipynb).
-2. Executa as células por ordem.
-3. A célula da pipeline principal gera os outputs em `output_water/`.
-4. A célula final de preview confirma o resultado e permite inspecionar o CSV/JSON gerados.
+1. Abre [pi_water.ipynb](pi_water.ipynb) no Google Colab.
+2. Configura os Colab Secrets necessários (ver tabela no notebook).
+3. Executa a célula Python — ela clona o repo, instala os requisitos e corre a pipeline.
 
-### Script
+### Local (Flask / linha de comandos)
+
+### Script (CLI)
 
 ```bash
 python scripts/pip_water.py
 ```
 
-O script faz a mesma pipeline do notebook: descobre ficheiros, normaliza dados, grava os outputs, persiste em Mongo/TiDB/CrateDB e produz o `water_result.json`.
+O script mantém compatibilidade com o comportamento antigo, mas agora delega na arquitetura modular (`pipeline.py`, `data_parser.py`, `db_writer.py`, `notifier.py`).
+
+Smoke test recomendado (sem writes em DB):
+
+```bash
+SKIP_DB_WRITES=true EMAIL_ENABLED=false python scripts/pip_water.py
+```
+
+No Windows PowerShell:
+
+```powershell
+$env:SKIP_DB_WRITES='true'; $env:EMAIL_ENABLED='false'; python scripts/pip_water.py
+```
+
+Isto valida descoberta/parsing/transform/anomalias/outputs sem tocar em MongoDB, TiDB, CrateDB nem email.
 
 Por defeito, quando a origem é o repositório, a pipeline escolhe 30 ficheiros aleatórios antes de os ler. Podes alterar isso com `REPO_SAMPLE_SIZE`.
 
@@ -146,7 +169,8 @@ Depois volta a correr a célula principal da pipeline.
 
 ## Notas
 
-- O notebook é a referência principal.
-- O script `scripts/pip_water.py` foi alinhado com o notebook para manter o mesmo comportamento funcional.
+- O notebook continua a ser a referência principal.
+- O script `scripts/pip_water.py` é um shim de compatibilidade para não quebrar imports legados.
+- A app Flask importa agora a fachada modular em `pipeline.py`.
 - O email inclui uma tabela de anomalias quando `anomalous_counters > 0`.
 
